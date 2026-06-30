@@ -8,7 +8,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PCAP_ABS="$(realpath "$PCAP")"
 PCAP_NAME="$(basename "$PCAP_ABS")"
 NAME="${PCAP_NAME%.*}"
-OUT="$ROOT/output/suricata/$NAME"
+# OUT_DIR 환경변수로 출력경로 덮어쓰기 가능 (extract_log.sh 가 사용). 없으면 기존 기본값.
+OUT="${OUT_DIR:-$ROOT/output/suricata/$NAME}"
 
 # 실행 전 출력 청소 (eve-log append=yes라 재실행 시 누적 → 숫자 오염 방지)
 rm -rf "$OUT"

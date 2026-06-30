@@ -12,7 +12,8 @@ PCAP_ABS="$(realpath "$PCAP")"
 PCAP_DIR="$(dirname "$PCAP_ABS")"
 PCAP_NAME="$(basename "$PCAP_ABS")"
 NAME="${PCAP_NAME%.*}"
-OUT="$ROOT/output/zeek/$NAME"
+# OUT_DIR 환경변수로 출력경로 덮어쓰기 가능 (extract_log.sh 가 사용). 없으면 기존 기본값.
+OUT="${OUT_DIR:-$ROOT/output/zeek/$NAME}"
 
 # 실행 전 출력 청소 (재실행 시 이전 로그/추출파일 누적 방지)
 rm -rf "$OUT"
