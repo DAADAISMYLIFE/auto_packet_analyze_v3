@@ -29,6 +29,7 @@ if [ "$(id -u)" -eq 0 ]; then SUDO=""; else SUDO="sudo"; fi
 log "0/5  apt 갱신"
 $SUDO apt-get update -y
 $SUDO apt-get install -y curl gnupg ca-certificates lsb-release software-properties-common
+$SUDO apt-get install -y zstd
 
 # -----------------------------------------------------------------------------
 # 1) Suricata + 룰
