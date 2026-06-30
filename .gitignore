@@ -1,0 +1,22 @@
+# Python venv (이식 불가 — 각 환경에서 새로 생성)
+venv/
+.venv/
+
+# pcap 캡처 파일 (용량 큼)
+pcaps/
+
+# 분석 산출물
+output/
+
+# Ollama 서버 로그 (setup.sh가 생성)
+ollama.log
+
+# Python 캐시
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# OS / 에디터
+.DS_Store
+.vscode/
+.idea/
