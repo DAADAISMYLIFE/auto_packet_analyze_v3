@@ -1,7 +1,7 @@
 import json
 from ollama import chat, ChatResponse
 
-from tools import TOOLS, AVAILABLE
+from test_tools import TOOLS, AVAILABLE
 
 MODEL = "gemma4:26b"
 
