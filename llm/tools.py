@@ -21,7 +21,7 @@ class Tools:
             
         # tool 등록 
         self.TOOLS = [self.get_hosts_info, self.get_host_info, self.get_alerts, self.get_alerts_by_severity,
-                      self.get_external, self.get_files, self.get_lateral_movement]
+                      self.get_external, self.search_external, self.get_files, self.get_lateral_movement]
         self.AVAILABLE = {fn.__name__: fn for fn in self.TOOLS}
 
 
@@ -101,13 +101,43 @@ class Tools:
         return [a for a in self.evidence.get("alerts", []) if a.get("severity") == severity]
 
     def get_external(self):
-        """Collect external contacts.
+        """Collect the alert-linked external contacts (the C2 / malware IOCs).
 
-        Returns external IPs, domains, and TLS SNI (each with first_ts) — C2/IOC candidates.
+        Returns only external IPs/domains that a Suricata alert references (an IP seen in
+        an alert, or a domain named in an alert signature or resolving to a flagged IP),
+        plus SNI and a count of the un-flagged background. This drops benign CDN/telemetry
+        noise. To reach ALL external contacts (e.g. a benign-looking precursor domain),
+        use search_external.
         """
+        e = self.evidence
+        alert_ips = {ip for a in e.get("alerts", [])
+                     for ip in (a.get("src_ips", []) + a.get("dst_ips", []))}
+        # signatures often defang domains ("hillcoweb .com") → strip spaces before matching
+        sigs = "".join(a.get("signature", "") for a in e.get("alerts", [])).lower().replace(" ", "")
+        ext = e.get("external", {})
+        ips = [x for x in ext.get("ips", []) if x.get("ip") in alert_ips]
+        doms = [d for d in ext.get("domains", [])
+                if d.get("query", "").lower() in sigs
+                or (set(d.get("answers") or []) & alert_ips)]
+        return {"ips": ips, "domains": doms, "sni": ext.get("sni", [])[:20],
+                "background_ips": len(ext.get("ips", [])) - len(ips),
+                "background_domains": len(ext.get("domains", [])) - len(doms)}
 
-        # 1. external 필드 파싱 후 return (ips / domains / sni)
-        return self.evidence.get("external", {})
+    def search_external(self, keyword: str) -> dict:
+        """Search ALL external contacts (not just alert-linked) by substring.
+
+        Use when you need an external IP/domain/SNI that get_external dropped as
+        background — e.g. a benign-looking precursor domain (patient-zero).
+
+        Args:
+            keyword: substring to match against external IPs, domains, and SNI.
+        """
+        k = keyword.lower()
+        ext = self.evidence.get("external", {})
+        ips = [x for x in ext.get("ips", []) if k in x.get("ip", "").lower()]
+        doms = [d for d in ext.get("domains", []) if k in d.get("query", "").lower()]
+        sni = [s for s in ext.get("sni", []) if k in s.get("sni", "").lower()]
+        return {"ips": ips[:30], "domains": doms[:30], "sni": sni[:30]}
 
     def get_files(self):
         """Collect transferred files.
