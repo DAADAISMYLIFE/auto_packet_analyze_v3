@@ -4,35 +4,32 @@ import os
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOGS_PATH = os.path.join(ROOT, "output")   # output/<pcap이름>/{suricata,zeek}/...
 
-TOOL_SCHEMAS = [{
-    # test_tool 호출용
-    "type": "function",
-      "function": {
-        "name": "test_tool",
-        "description": "테스트용 함수를 호출합니다.",
-        "parameters": {
-          "type": "object",
-          "required": ["arg1"],
-          "properties": {
-            "arg1": {"type": "string", "description": "테스트용 매개변수 입니다."}
-          }
-        }
-      }
-    },
-    # 다른거
-]
 
-def test_tool(arg1):
-    return {"결과" : True, "인수1": arg1}
+# =============================================================================
+# tool 함수들
+#   - 타입힌트(arg: str) 와 docstring 을 잘 써야 자동 스키마가 정확히 나옴.
+#     (모델은 이 description 을 보고 "언제/어떻게 부를지" 판단함)
+#   - 새 tool 추가 = 아래에 함수 정의 + 맨 밑 TOOLS 리스트에 이름만 등록.
+# =============================================================================
 
-def get_log(filename, limit=100):
-    """output/ 아래의 NDJSON 로그(.log / eve.json)를 읽어 레코드 리스트를 반환.
+def test_tool(arg1: str) -> dict:
+    """테스트용 함수. 입력받은 값을 그대로 되돌려준다.
 
-    filename 예: 'test-http/suricata/eve.json'
-                 'test-http/zeek/conn.log'
-    limit: 너무 큰 파일이 컨텍스트를 터뜨리지 않게 최대 N줄만.
+    Args:
+        arg1: 아무 문자열이나. 테스트용 매개변수.
     """
-    # ROOT/output 에 filename 합치기 (placeholder 였던 부분)
+    return {"결과": True, "인수1": arg1}
+
+
+def get_log(filename: str, limit: int = 100) -> list:
+    """output/ 아래의 NDJSON 로그(.log / eve.json)를 읽어 레코드 리스트로 반환한다.
+
+    Args:
+        filename: output 기준 상대경로. 예) 'test-http/suricata/eve.json',
+                  'test-http/zeek/conn.log'
+        limit: 최대 줄 수. 큰 파일이 컨텍스트를 터뜨리지 않게 잘라준다.
+    """
+    # ROOT/output 에 filename 합치기
     path = os.path.realpath(os.path.join(LOGS_PATH, filename))
 
     # 경로 탈출(../) 방지 — output 밖이면 거부
@@ -54,7 +51,16 @@ def get_log(filename, limit=100):
                 continue   # 깨진 줄은 건너뜀
             if len(records) >= limit:
                 break
-    print(records)
     return records
 
 
+# =============================================================================
+# 등록소 — 새 tool 은 여기에 함수 이름만 추가하면 됨.
+#   TOOLS     : chat(tools=TOOLS) 로 넘김 → ollama 가 함수에서 스키마 자동 생성
+#   AVAILABLE : 모델이 부른 이름 → 실제 함수 (실행용 디스패치). 자동 파생.
+# =============================================================================
+TOOLS = [
+    test_tool,
+    get_log,
+]
+AVAILABLE = {fn.__name__: fn for fn in TOOLS}
