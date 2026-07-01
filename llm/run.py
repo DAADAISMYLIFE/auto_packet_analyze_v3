@@ -5,6 +5,7 @@ from ollama import chat
 
 MODEL = "gemma4:26b"
 MAX_TURNS = 12         # tool 루프 무한방지 (필수 섹션 다 조회 + 결론 낼 여유)
+NUM_CTX = 16384        # 컨텍스트 크기 (tool 결과 누적 + 최종 답 잘림 방지)
 
 SYSTEM_PROMPT = """\
 # Role
@@ -54,7 +55,8 @@ def chatting(tools):
     ]
 
     for _ in range(MAX_TURNS):
-        res = chat(model=MODEL, messages=messages, tools=tools.TOOLS)
+        res = chat(model=MODEL, messages=messages, tools=tools.TOOLS,
+                   options={"num_ctx": NUM_CTX})
 
         # tool 을 안 부르면 그게 최종 답
         if not res.message.tool_calls:

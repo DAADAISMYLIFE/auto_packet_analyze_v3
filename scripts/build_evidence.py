@@ -193,7 +193,7 @@ def build_evidence(name, root="/home/qkekdhd/auto_packet_analyze_v3"):
     def host_slot(ip):
         return hosts.setdefault(ip, {"ip": ip, "mac": None, "hostname": None,
                                      "username": None, "ad_domain": None,
-                                     "scope": "internal",
+                                     "scope": "internal", "role": None,
                                      "first_ts": None, "last_ts": None})
 
     for d in conn:
@@ -238,6 +238,30 @@ def build_evidence(name, root="/home/qkekdhd/auto_packet_analyze_v3"):
         ip = fl.get("id.orig_h")
         if ip in hosts and d.get("hostname"):
             hosts[ip]["hostname"] = hosts[ip]["hostname"] or d["hostname"]
+
+    # ── host role (결정론적: 프로토콜 역할로 판정, 추론 아님) ──
+    #   domain_controller = kerberos/ldap 의 최다 목적지(내부)  (KDC/LDAP 서버 = 정의상 DC)
+    #   dns_server        = DNS(:53) 최다 응답자(내부); 보통 DC 와 동일 → DC 우선
+    #   workstation       = kerberos 사용자 계정이 있는 내부 호스트
+    #   그 외(게이트웨이 등)은 규칙이 불확실 → role=None (추론 안 함)
+    def top_internal_resp(logs):
+        c = Counter()
+        for lg in logs:
+            for d in read_ndjson(f"{Z}/{lg}") or []:
+                rh = d.get("id.resp_h")
+                if rh in hosts:                       # 내부 호스트만
+                    c[rh] += 1
+        return c.most_common(1)[0][0] if c else None
+
+    dc_ip = top_internal_resp(["kerberos.log", "ldap.log", "ldap_search.log"])
+    dns_ip = top_internal_resp(["dns.log"])
+    for ip, h in hosts.items():
+        if ip == dc_ip:
+            h["role"] = "domain_controller"
+        elif ip == dns_ip:
+            h["role"] = "dns_server"
+        elif h["username"]:
+            h["role"] = "workstation"
 
     # ── external (목표2/4/5): ip/도메인/sni + first_ts ──
     ext_ip = {}          # ip -> {first_ts, conns}
