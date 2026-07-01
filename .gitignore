@@ -8,6 +8,9 @@ pcaps/
 # 분석 산출물
 output/
 
+# 정답지 (MTA 저작물 — 공개 레포에 올리지 않음)
+answers/
+
 # Ollama 서버 로그 (setup.sh가 생성)
 ollama.log
 
