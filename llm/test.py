@@ -1,10 +1,9 @@
 import json
 from ollama import chat, ChatResponse
 
-from tools import TOOLS, AVAILABLE   # llm/ 안에서 실행 기준
+from tools import TOOLS, AVAILABLE
 
 MODEL = "gemma4:26b"
-
 
 def test_hello():
     response: ChatResponse = chat(model=MODEL, messages=[
@@ -14,10 +13,9 @@ def test_hello():
 
 
 def test_tool_call():
-    """일단 test_tool 이 잘 불리는지 확인용."""
     messages = [{
         "role": "user",
-        "content": "테스트용 툴 돌려줘. arg1엔 나한테 하고 싶은 말을 넣어.",
+        "content": "테스트용 툴 돌려줘. arg1엔 나한테 하고 싶은 말을 한 단어로 넣어줘.",
     }]
     # 함수 객체를 그대로 넘김 → ollama 가 타입힌트+docstring 으로 스키마 자동 생성
     response: ChatResponse = chat(model=MODEL, messages=messages, tools=TOOLS)
@@ -32,11 +30,9 @@ def test_tool_call():
         print("호출:", name, args)
         print("결과:", result)
 
-
 def main():
     test_hello()
     test_tool_call()
-
 
 if __name__ == "__main__":
     main()
