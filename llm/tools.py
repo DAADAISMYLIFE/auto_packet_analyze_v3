@@ -1,37 +1,37 @@
 """
-Tier2 드릴다운 tool (FR-A).
+Tier2 drill-down tools (FR-A).
 
-evidence(Tier1)로 부족할 때 raw 로그를 파고든다. 모델이 tool_calls 로 호출하면
-오케스트레이터가 실행해서 결과를 되돌린다.
+Used when the Tier1 evidence is not enough and raw logs must be inspected.
+When the model emits tool_calls, the orchestrator runs these and returns the result.
 
-공통 요구사항:
-  FR-C1: raw 로그(output/<name>/{zeek,suricata})를 읽음. "현재 pcap"은
-         set_context() 로 오케스트레이터가 바인딩 (모델 인자는 query만).
-  FR-C2: 반환은 compact/구조화 + 결과 크기 캡(RESULT_CAP).
-  FR-C3: 경로 안전(output/<name> 밖 금지), 에러는 예외 말고 {"error":...}.
-  FR-C4: 결정론적. 타입힌트+docstring → 자동 스키마. TOOLS 에 등록.
+Common requirements:
+  FR-C1: read raw logs (output/<name>/{zeek,suricata}). The "current pcap" is
+         bound by the orchestrator via set_context() (model args are query-only).
+  FR-C2: return compact/structured data, capped at RESULT_CAP.
+  FR-C3: path-safe (never leave output/<name>); return {"error":...} instead of raising.
+  FR-C4: deterministic. Type hints + docstrings -> auto schema. Registered in TOOLS.
 """
 import json
 import os
 
-# ── 현재 pcap 컨텍스트 (오케스트레이터가 세팅; 모델엔 노출 안 함) ──
-_CTX = {"base": None}     # output/<name> 절대경로
-_CACHE = {}               # 절대경로 -> list[dict] (같은 로그 반복 읽기 방지)
+# ── current pcap context (set by the orchestrator; not exposed to the model) ──
+_CTX = {"base": None}     # absolute path of output/<name>
+_CACHE = {}               # abs path -> list[dict] (avoid re-reading the same log)
 
-RESULT_CAP = 50           # tool 결과 최대 항목 수 (FR-C2)
+RESULT_CAP = 50           # max items per tool result (FR-C2)
 
 
 def set_context(base: str) -> None:
-    """분석 대상 pcap 의 output 디렉(output/<name>)을 바인딩. (모델 비노출)"""
+    """Bind the output dir (output/<name>) of the pcap under analysis. Not model-facing."""
     _CTX["base"] = os.path.abspath(base)
     _CACHE.clear()
 
 
 # ---------------------------------------------------------------------------
-# 내부 헬퍼
+# internal helpers
 # ---------------------------------------------------------------------------
 def _read(rel_path):
-    """zeek/suricata NDJSON 안전 로딩 → list[dict]. 경로 이탈/미설정 시 None."""
+    """Safely load a zeek/suricata NDJSON file -> list[dict]. None if unset/escaping."""
     base = _CTX["base"]
     if base is None:
         return None
@@ -55,8 +55,8 @@ def _read(rel_path):
     return out
 
 
-def _wrap(items, hint="조건을 좁히세요"):
-    """리스트 결과를 RESULT_CAP 로 자르고 count/truncated 신호 부착. (FR-C2)"""
+def _wrap(items, hint="narrow the query"):
+    """Cap a list result at RESULT_CAP and attach count/truncated signals (FR-C2)."""
     return {"count": len(items),
             "truncated": max(0, len(items) - RESULT_CAP),
             "hint": hint if len(items) > RESULT_CAP else None,
@@ -67,7 +67,7 @@ def _no_ctx():
     return _CTX["base"] is None
 
 
-# ── 필드 투영 (compact 반환용) ──
+# ── field projections (for compact returns) ──
 def _p_conn(c):
     return {k: c.get(k) for k in ("ts", "uid", "community_id", "id.orig_h", "id.orig_p",
                                   "id.resp_h", "id.resp_p", "proto", "service", "duration",
@@ -103,22 +103,22 @@ def _p_files(d):
 
 
 # ---------------------------------------------------------------------------
-# 드릴다운 tool (모델 호출용)
+# drill-down tools (model-facing)
 # ---------------------------------------------------------------------------
 def get_flow_detail(community_id: str) -> dict:
-    """community_id 로 한 flow 의 conn/http/dns/ssl/files 원본과 suricata alert 를
-    uid·community_id 로 병합해 반환.
+    """Return one flow's raw conn/http/dns/ssl/files records plus its Suricata
+    alerts, joined by uid and community_id.
 
     Args:
-        community_id: evidence 의 alert/files/external 에 있는 flow 식별자.
+        community_id: the flow identifier found in evidence alerts/files/external.
     """
     if _no_ctx():
-        return {"error": "pcap 컨텍스트 미설정"}
+        return {"error": "pcap context not set"}
     conn = _read("zeek/conn.log") or []
     uids = [c.get("uid") for c in conn
             if c.get("community_id") == community_id and c.get("uid")]
     if not uids:
-        return {"error": f"해당 community_id 의 flow 없음: {community_id}"}
+        return {"error": f"no flow for community_id: {community_id}"}
 
     dns = _read("zeek/dns.log") or []
     http = _read("zeek/http.log") or []
@@ -144,15 +144,16 @@ def get_flow_detail(community_id: str) -> dict:
 
 
 def search_alerts(signature_contains: str = "", src: str = "", dst: str = "") -> dict:
-    """suricata alert 원본을 시그니처/출발IP/도착IP 로 검색. 빈 문자열 조건은 무시.
+    """Search raw Suricata alerts by signature substring / source IP / dest IP.
+    Empty-string filters are ignored.
 
     Args:
-        signature_contains: 시그니처 부분일치 키워드 (예: 'Cobalt Strike').
-        src: 출발 IP 정확일치.
-        dst: 도착 IP 정확일치.
+        signature_contains: signature substring (e.g. 'Cobalt Strike').
+        src: exact source IP.
+        dst: exact destination IP.
     """
     if _no_ctx():
-        return {"error": "pcap 컨텍스트 미설정"}
+        return {"error": "pcap context not set"}
     sig = signature_contains.lower()
     out = []
     for d in _read("suricata/eve.json") or []:
@@ -170,14 +171,14 @@ def search_alerts(signature_contains: str = "", src: str = "", dst: str = "") ->
 
 
 def search_http(host: str = "", uri_contains: str = "") -> dict:
-    """HTTP 요청 원본을 host/URI 부분일치로 검색. 빈 문자열 조건은 무시.
+    """Search raw HTTP requests by host / URI substring. Empty-string filters are ignored.
 
     Args:
-        host: HTTP Host 부분일치 (예: 'example.com').
-        uri_contains: 요청 URI 부분일치 (예: '/gate.php').
+        host: HTTP Host substring (e.g. 'example.com').
+        uri_contains: request URI substring (e.g. '/gate.php').
     """
     if _no_ctx():
-        return {"error": "pcap 컨텍스트 미설정"}
+        return {"error": "pcap context not set"}
     h, u = host.lower(), uri_contains.lower()
     out = []
     for d in _read("zeek/http.log") or []:
@@ -190,13 +191,13 @@ def search_http(host: str = "", uri_contains: str = "") -> dict:
 
 
 def search_dns(query_contains: str = "") -> dict:
-    """DNS 질의 원본을 도메인 부분일치로 검색.
+    """Search raw DNS queries by domain substring.
 
     Args:
-        query_contains: 질의 도메인 부분일치 키워드.
+        query_contains: query-domain substring.
     """
     if _no_ctx():
-        return {"error": "pcap 컨텍스트 미설정"}
+        return {"error": "pcap context not set"}
     q = query_contains.lower()
     out = [_p_dns(d) for d in _read("zeek/dns.log") or []
            if not q or q in (d.get("query") or "").lower()]
@@ -204,30 +205,30 @@ def search_dns(query_contains: str = "") -> dict:
 
 
 def get_connections_by_ip(ip: str) -> dict:
-    """특정 IP 가 출발이든 도착이든 관여한 모든 flow 를 반환.
+    """Return every flow in which the IP is either source or destination.
 
     Args:
-        ip: 조회할 IP 주소 (내부/외부 무관).
+        ip: IP address to look up (internal or external).
     """
     if _no_ctx():
-        return {"error": "pcap 컨텍스트 미설정"}
+        return {"error": "pcap context not set"}
     out = [_p_conn(c) for c in _read("zeek/conn.log") or []
            if c.get("id.orig_h") == ip or c.get("id.resp_h") == ip]
     return _wrap(out)
 
 
 def get_host_info(ip: str = "", mac: str = "") -> dict:
-    """IP 또는 MAC 으로 호스트 신원(hostname/username/domain/mac)을
-    kerberos/ntlm/dhcp/conn 원본에서 확정 조회. ip/mac 중 하나는 필요.
+    """Resolve a host's identity (hostname/username/domain/mac) from raw
+    kerberos/ntlm/dhcp/conn logs. Provide either ip or mac.
 
     Args:
-        ip: 조회할 내부 호스트 IP.
-        mac: 조회할 MAC 주소 (ip 모를 때).
+        ip: internal host IP to look up.
+        mac: MAC address to look up (when the IP is unknown).
     """
     if _no_ctx():
-        return {"error": "pcap 컨텍스트 미설정"}
+        return {"error": "pcap context not set"}
     if not ip and not mac:
-        return {"error": "ip 또는 mac 중 하나는 필요"}
+        return {"error": "need either ip or mac"}
 
     conn = _read("zeek/conn.log") or []
     info = {"ip": ip or None, "mac": mac or None,
@@ -264,16 +265,16 @@ def get_host_info(ip: str = "", mac: str = "") -> dict:
 
 
 def get_malware_file(sha256: str) -> dict:
-    """sha256 으로 파일 메타데이터 + carved 파일 디스크 경로(extract_files/)를 반환.
+    """Return file metadata and the carved file's on-disk path (extract_files/) for a sha256.
 
     Args:
-        sha256: evidence.files 에 있는 파일 SHA256.
+        sha256: SHA256 of the file (from evidence.files).
     """
     if _no_ctx():
-        return {"error": "pcap 컨텍스트 미설정"}
+        return {"error": "pcap context not set"}
     rec = next((f for f in _read("zeek/files.log") or [] if f.get("sha256") == sha256), None)
     if not rec:
-        return {"error": f"해당 sha256 파일 없음: {sha256}"}
+        return {"error": f"no file with sha256: {sha256}"}
     info = _p_files(rec)
     extracted = rec.get("extracted")
     if extracted:
@@ -284,7 +285,7 @@ def get_malware_file(sha256: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# 등록소 (FR-C4)
+# registry (FR-C4)
 # ---------------------------------------------------------------------------
 TOOLS = [
     get_flow_detail,

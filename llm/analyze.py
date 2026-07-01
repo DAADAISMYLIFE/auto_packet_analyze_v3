@@ -1,14 +1,18 @@
 """
-분석 오케스트레이터 (pipeline step4, FR-B).
+Analysis orchestrator (pipeline step 4, FR-B).
 
   python3 analyze.py <name>
-    입력:  output/<name>/evidence.json  (build_evidence.py 산출)
-    출력:  output/<name>/analysis.json  (step5 보고서가 소비)
+    input:  output/<name>/evidence.json   (from build_evidence.py)
+    output: output/<name>/analysis.json   (consumed by step 5 report)
+            output/<name>/analyze_trace.json  (full debug trace)
 
-흐름:
-  evidence 로드 → 각 stage 순차 실행(각 stage = evidence 전체 + focus 지시
-  + tool 드릴다운 + structured output) → 후반 stage 는 앞 stage 출력을 입력으로
-  → 전부 수집해 analysis.json 저장.
+Flow:
+  load evidence -> run each stage in order (each stage = full evidence + focused
+  instruction + tool drill-down + structured output) -> later stages take earlier
+  stage outputs as input -> collect all into analysis.json.
+
+Everything in this stage is done in ENGLISH (to maximize model comprehension);
+only the final human report (step 5) is Korean.
 """
 import json
 import os
@@ -19,28 +23,63 @@ from ollama import chat
 
 import tools
 
-# ── 모델 설정 (FR-2) ──
+# ── model config (FR-2) ──
 MODEL = os.environ.get("MODEL", "gemma4:26b")
-TEMPERATURE = 0.3          # 사실판단 → 낮게
-MAX_TOOL_TURNS = 8         # tool 루프 무한방지 (FR-4)
+TEMPERATURE = 0.3          # factual judgment -> low
+MAX_TOOL_TURNS = 8         # tool-loop guard (FR-4)
 NUM_CTX_MIN = 8192
 NUM_CTX_MAX = 65536
 
+# ── project overview + role (shared across stages -> system message) ──
 SYSTEM_PROMPT = (
-    "너는 네트워크 포렌식 분석가다. 주어진 evidence(정규화된 사실)를 근거로 판단하라. "
-    "IP·도메인·해시 등 모든 지표는 evidence 나 tool 결과에 실재해야 한다. 절대 지어내지 마라. "
-    "확실치 않으면 제공된 tool 로 raw 로그를 조회한 뒤 판단하라. 모든 분석은 한국어로 한다."
+    "# Project overview\n"
+    "You are the 'analysis' stage of an automated network-forensics pipeline. "
+    "The machine has already done pcap -> (Suricata/Zeek) -> evidence (a JSON of "
+    "deterministically extracted FACTS). Your job is to reason over this evidence to "
+    "determine the incident. The final deliverables are victim identity, attacker, "
+    "attack behavior, timeline, and blocking policy; you handle part of it now.\n\n"
+    "# Role\n"
+    "You are a network forensics analyst.\n"
+    "- Base every judgment ONLY on the provided evidence and tool-query results.\n"
+    "- NEVER invent IPs, domains, hashes, hostnames, or usernames from prior knowledge or guessing.\n"
+    "- Do not output any value that does not appear verbatim in the evidence.\n"
+    "- If something is unknown, leave it empty (null/omit). Empty is better than fabricated.\n"
+    "- Reason in English."
 )
 
 
 # ---------------------------------------------------------------------------
-# stage 정의 (FR-5): focus 지시 + 출력 JSON Schema(FR-7) + 앞 stage 사용 여부
+# stage definitions (FR-5): focused instruction + output JSON Schema (FR-7)
 # ---------------------------------------------------------------------------
 STAGES = [
     {
         "name": "victim_identity",
-        "instruction": "감염/피해 정황이 있는 내부 호스트의 신원(ip/mac/hostname/username)을 "
-                       "확정하고 각 호스트의 역할(victim/domain_controller/gateway 등)을 지정하라.",
+        "instruction": (
+            "[Goal] Determine the identities of the victim / internal hosts.\n"
+            "# Methodology\n"
+            "1. Read the evidence.hosts array. Internal host identities exist ONLY there.\n"
+            "2. For each host, copy ip/mac/hostname/username/ad_domain VERBATIM from the "
+            "evidence. Do not transform, normalize, or fill in missing values.\n"
+            "3. Assign role: hostname ending in '-DC', or kerberos service centered on "
+            "krbtgt/ldap -> domain_controller; a workstation involved in "
+            "alerts/external contact/file download -> victim; otherwise -> gateway/server. "
+            "Judge role from context, but NEVER fabricate identity fields (ip/mac, etc.).\n"
+            "4. If an identity is uncertain, call get_host_info(ip=...) to query raw logs, then decide.\n"
+            "5. Output ONLY the specified JSON schema. No prose."
+        ),
+        "input_example": (
+            '{"hosts":[{"ip":"10.20.30.40","mac":"aa:bb:cc:dd:ee:ff","hostname":"PC-KIM",'
+            '"username":"kim.minsu","ad_domain":"CORP.LOCAL"},'
+            '{"ip":"10.20.30.5","mac":"11:22:33:44:55:66","hostname":"CORP-DC",'
+            '"username":null,"ad_domain":null}],'
+            '"alerts":[{"signature":"ET MALWARE ...","severity":1,"src_ips":["10.20.30.40"]}]}'
+        ),
+        "output_example": (
+            '{"hosts":[{"ip":"10.20.30.40","mac":"aa:bb:cc:dd:ee:ff","hostname":"PC-KIM",'
+            '"username":"kim.minsu","role":"victim"},'
+            '{"ip":"10.20.30.5","mac":"11:22:33:44:55:66","hostname":"CORP-DC",'
+            '"username":null,"role":"domain_controller"}]}'
+        ),
         "uses_prior": [],
         "schema": {
             "type": "object",
@@ -65,8 +104,14 @@ STAGES = [
     },
     {
         "name": "attack_assessment",
-        "instruction": "공격자 endpoint(외부 IP/도메인)와 각 피해 호스트가 감염된 멀웨어 및 "
-                       "관측된 공격 행위(다운로드/C2/측면이동 등)를 판단하라.",
+        "instruction": (
+            "[Goal] Determine attacker endpoints (external IPs/domains) and, for each victim "
+            "host, the malware and observed attack behaviors (download / C2 / lateral movement).\n"
+            "Base everything on evidence.alerts / evidence.external / evidence.files / "
+            "evidence.lateral_movement. Malware family names usually come directly from the "
+            "alert 'signature' text (e.g. 'ET MALWARE Cobalt Strike ...'). Use tools to drill "
+            "down when needed. Output ONLY the specified JSON schema."
+        ),
         "uses_prior": ["victim_identity"],
         "schema": {
             "type": "object",
@@ -101,8 +146,11 @@ STAGES = [
     },
     {
         "name": "infection_timeline",
-        "instruction": "감염 경로를 시간순 타임라인/시나리오로 구성하라. "
-                       "각 이벤트에 시각·주체·행위를 명시하라.",
+        "instruction": (
+            "[Goal] Reconstruct the infection chain as a chronological timeline / scenario. "
+            "For each event include timestamp, actor, and action. Order strictly by time using "
+            "the ts fields in the evidence. Output ONLY the specified JSON schema."
+        ),
         "uses_prior": ["victim_identity", "attack_assessment"],
         "schema": {
             "type": "object",
@@ -127,8 +175,12 @@ STAGES = [
     },
     {
         "name": "block_policy",
-        "instruction": "확정된 IOC(외부 IP/도메인/URL/파일해시)로 차단정책(패턴)을 생성하라. "
-                       "각 규칙에 차단 대상 값과 근거를 명시하라.",
+        "instruction": (
+            "[Goal] Generate blocking rules (patterns) from the confirmed IOCs "
+            "(external IPs / domains / URLs / file hashes). Each rule needs the value to block "
+            "and the reason. Only use IOC values that appear verbatim in the evidence. "
+            "Output ONLY the specified JSON schema."
+        ),
         "uses_prior": ["attack_assessment", "infection_timeline"],
         "schema": {
             "type": "object",
@@ -138,7 +190,7 @@ STAGES = [
                     "items": {
                         "type": "object",
                         "properties": {
-                            "type": {"type": "string"},       # ip|domain|url|sha256
+                            "type": {"type": "string"},       # ip | domain | url | sha256
                             "value": {"type": "string"},
                             "reason": {"type": "string"},
                         },
@@ -153,13 +205,31 @@ STAGES = [
 
 
 # ---------------------------------------------------------------------------
-# 로드 / 설정
+# debug trace (FR: full visibility into requests / responses / thinking / tools)
+# ---------------------------------------------------------------------------
+TRACE = []                 # list of per-stage trace dicts
+
+
+def _msg_dict(m):
+    """ollama message -> plain dict (for logging)."""
+    d = {"role": getattr(m, "role", None), "content": getattr(m, "content", None)}
+    think = getattr(m, "thinking", None)
+    if think:
+        d["thinking"] = think
+    tcs = getattr(m, "tool_calls", None)
+    if tcs:
+        d["tool_calls"] = [{"name": tc.function.name, "arguments": dict(tc.function.arguments)}
+                           for tc in tcs]
+    return d
+
+
+# ---------------------------------------------------------------------------
+# load / config
 # ---------------------------------------------------------------------------
 def load_evidence(base):
-    """output/<name>/evidence.json 로드 → dict."""
     path = os.path.join(base, "evidence.json")
     if not os.path.isfile(path):
-        raise SystemExit(f"evidence.json 없음: {path} (scripts/build_evidence.py 먼저 실행)")
+        raise SystemExit(f"evidence.json missing: {path} (run scripts/build_evidence.py first)")
     with open(path, encoding="utf-8") as f:
         return json.load(f)
 
@@ -169,56 +239,76 @@ def _compact(obj):
 
 
 def compute_num_ctx(evidence):
-    """evidence 가 통째로 들어갈 num_ctx 산정 (FR-2).
-    토큰 ~= 문자/4. system + tool 결과 + 추론 + 출력 여유를 더하고 1024 단위 올림·클램프.
-    """
+    """Size num_ctx so the whole evidence fits (FR-2). ~= chars/4 + headroom, clamped."""
     ev_tokens = len(_compact(evidence)) // 4
-    need = ev_tokens + 8000                    # 여유(도구결과/추론/출력)
+    need = ev_tokens + 8000
     ctx = ((need + 1023) // 1024) * 1024
     return max(NUM_CTX_MIN, min(ctx, NUM_CTX_MAX))
 
 
 # ---------------------------------------------------------------------------
-# tool 호출 루프 (FR-4)
+# ollama call helpers (capture thinking when supported)
 # ---------------------------------------------------------------------------
-def run_tool_loop(messages, num_ctx):
-    """모델 호출 → tool_calls 있으면 실행·주입·재호출 → 없을 때까지(최대 MAX_TOOL_TURNS).
-    tool 을 쓰며 추론하게 하는 단계 (structured output 아님)."""
+def _reason_chat(messages, num_ctx):
+    """Tool-enabled reasoning call. Requests thinking; falls back if unsupported."""
+    kw = dict(model=MODEL, messages=messages, tools=tools.TOOLS,
+              options={"temperature": TEMPERATURE, "num_ctx": num_ctx})
+    try:
+        return chat(**kw, think=True)
+    except TypeError:
+        return chat(**kw)
+
+
+# ---------------------------------------------------------------------------
+# tool loop (FR-4) — logs every turn/thinking/tool call into stage_trace
+# ---------------------------------------------------------------------------
+def run_tool_loop(messages, num_ctx, stage_trace):
     res = None
-    for _ in range(MAX_TOOL_TURNS):
-        res = chat(model=MODEL, messages=messages, tools=tools.TOOLS,
-                   options={"temperature": TEMPERATURE, "num_ctx": num_ctx})
+    for turn in range(MAX_TOOL_TURNS):
+        res = _reason_chat(messages, num_ctx)
+        stage_trace["turns"].append(_msg_dict(res.message))
+        think_len = len(getattr(res.message, "thinking", "") or "")
+        n_tc = len(res.message.tool_calls or [])
+        print(f"      turn {turn}: thinking={think_len}c tool_calls={n_tc}")
+
         if not res.message.tool_calls:
             return res
         messages.append(res.message)
         for tc in res.message.tool_calls:
             name = tc.function.name
+            args = dict(tc.function.arguments)
             fn = tools.AVAILABLE.get(name)
             try:
-                result = fn(**tc.function.arguments) if fn else {"error": f"unknown tool: {name}"}
-            except Exception as e:                       # tool 실패도 데이터로 (FR-C3)
-                result = {"error": f"tool 실행 실패: {e}"}
+                result = fn(**args) if fn else {"error": f"unknown tool: {name}"}
+            except Exception as e:                       # tool failure as data (FR-C3)
+                result = {"error": f"tool execution failed: {e}"}
+            stage_trace["tool_results"].append({"name": name, "arguments": args, "result": result})
+            print(f"         tool {name}({args}) -> {str(result)[:80]}")
             messages.append({"role": "tool", "tool_name": name,
                              "content": json.dumps(result, ensure_ascii=False, default=str)})
-    return res      # 턴 캡 도달 — 마지막 응답 반환
+    return res      # hit turn cap
 
 
 # ---------------------------------------------------------------------------
-# stage 실행 (FR-5,6,7,8,10)
+# stage execution (FR-5,6,7,8,10)
 # ---------------------------------------------------------------------------
 def build_stage_messages(stage, evidence, prior_outputs):
-    """system(역할/그라운딩) + user(evidence 전체 + focus + 필요시 앞 stage 출력)."""
-    parts = [f"[분석 목표]\n{stage['instruction']}", "",
-             "[evidence]", _compact(evidence)]
+    """system(overview/role) + user(methodology -> examples -> real evidence -> prior)."""
+    parts = [stage["instruction"]]
+    if stage.get("input_example"):
+        parts += ["", "# Input example (format only - NOT real values)", stage["input_example"]]
+    if stage.get("output_example"):
+        parts += ["", "# Output example (correct answer for the input above)", stage["output_example"]]
+    parts += ["", "# Actual evidence (perform the task on THIS; take values only from here)",
+              _compact(evidence)]
     for k in stage["uses_prior"]:                        # FR-6
         if k in prior_outputs:
-            parts += ["", f"[이전 단계 결과: {k}]", _compact(prior_outputs[k])]
+            parts += ["", f"# Prior stage result: {k}", _compact(prior_outputs[k])]
     return [{"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": "\n".join(parts)}]
 
 
 def parse_structured(content):
-    """모델 출력 문자열 → dict. 실패 시 None."""
     try:
         return json.loads(content)
     except (json.JSONDecodeError, TypeError):
@@ -226,35 +316,44 @@ def parse_structured(content):
 
 
 def run_stage(stage, evidence, prior_outputs, num_ctx):
-    """한 stage: 메시지 구성 → tool 루프(추론) → structured output 추출 → 그라운딩 검증."""
+    stage_trace = {"stage": stage["name"], "request": None,
+                   "turns": [], "tool_results": [],
+                   "structured_raw": None, "output": None, "grounding_warnings": []}
     messages = build_stage_messages(stage, evidence, prior_outputs)
-    run_tool_loop(messages, num_ctx)                     # 추론 + 드릴다운
+    stage_trace["request"] = [{"role": m["role"], "content": m["content"]} for m in messages]
 
-    # structured output 추출 (FR-7). 잘못된 JSON 이면 재시도 (FR-10)
+    run_tool_loop(messages, num_ctx, stage_trace)        # reasoning + drill-down
+
+    # structured output extraction (FR-7); retry on invalid JSON (FR-10)
     messages.append({"role": "user",
-                     "content": "위 분석 결과를 지정된 JSON 스키마로만 출력하라. "
-                                "근거(evidence/tool)가 없는 값은 포함하지 마라."})
+                     "content": "Now output ONLY the JSON matching the specified schema. "
+                                "Do not include any value not grounded in the evidence or tool results."})
     output, res = None, None
     for _ in range(2):
         res = chat(model=MODEL, messages=messages, format=stage["schema"],
                    options={"temperature": TEMPERATURE, "num_ctx": num_ctx})
+        stage_trace["structured_raw"] = res.message.content
         output = parse_structured(res.message.content)
         if output is not None:
             break
         messages.append({"role": "user",
-                         "content": "유효한 JSON 이 아니다. 스키마에 맞는 JSON 만 다시 출력하라."})
+                         "content": "That was not valid JSON. Output only JSON matching the schema."})
     if output is None:
-        return {"_error": "structured output 파싱 실패",
-                "raw": res.message.content if res else None}
+        stage_trace["output"] = {"_error": "structured output parse failed"}
+        TRACE.append(stage_trace)
+        return stage_trace["output"]
 
     warnings = check_grounding(output, evidence)         # FR-8
     if warnings:
         output["_grounding_warnings"] = warnings
+        stage_trace["grounding_warnings"] = warnings
+    stage_trace["output"] = output
+    TRACE.append(stage_trace)
     return output
 
 
 # ---------------------------------------------------------------------------
-# 그라운딩 검증 (FR-8) — 지어낸 IP/해시 탐지 (경고)
+# grounding check (FR-8) — detect fabricated IPs / hashes (warning only)
 # ---------------------------------------------------------------------------
 _IP_RE = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
 _HASH_RE = re.compile(r"\b[a-fA-F0-9]{64}\b")
@@ -272,8 +371,6 @@ def _iter_strings(obj):
 
 
 def check_grounding(output, evidence):
-    """출력의 IP/sha256 이 evidence 텍스트에 실재하는지 검증 → 없으면 경고 리스트.
-    (도메인은 파생/정규화 변형이 많아 오탐이 커서 v1 에서는 IP·해시만 검사)"""
     ev_text = _compact(evidence).lower()
     warnings, seen = [], set()
     for s in _iter_strings(output):
@@ -284,40 +381,45 @@ def check_grounding(output, evidence):
                     continue
                 seen.add(val)
                 if val not in ev_text:
-                    warnings.append({"value": m, "kind": kind, "note": "evidence 에 없음"})
+                    warnings.append({"value": m, "kind": kind, "note": "not in evidence"})
     return warnings
 
 
 # ---------------------------------------------------------------------------
-# 오케스트레이션 (FR-9,11)
+# orchestration (FR-9,11)
 # ---------------------------------------------------------------------------
 def analyze(name, root):
-    """전체 stage 를 순서대로 실행하고 결과를 모아 반환."""
     base = os.path.join(root, "output", name)
     tools.set_context(base)                              # FR-3
     evidence = load_evidence(base)
     num_ctx = compute_num_ctx(evidence)
+    TRACE.clear()
     print(f"[analyze] {name}  num_ctx={num_ctx}  model={MODEL}")
 
     outputs = {}
     for stage in STAGES:
         prior = {k: outputs[k] for k in stage["uses_prior"] if k in outputs}
         print(f"  - stage: {stage['name']} ...")
-        outputs[stage["name"]] = run_stage(stage, evidence, prior, num_ctx)   # FR-11
+        outputs[stage["name"]] = run_stage(stage, evidence, prior, num_ctx)
+        if outputs[stage["name"]].get("_grounding_warnings"):
+            print(f"    ! grounding warnings: {outputs[stage['name']]['_grounding_warnings']}")
 
     return {"pcap": name, "model": MODEL, "stages": outputs}
 
 
 def main():
     if len(sys.argv) < 2:
-        raise SystemExit("사용법: python3 analyze.py <name>")
+        raise SystemExit("usage: python3 analyze.py <name>")
     name = sys.argv[1]
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # llm/ 의 부모
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # parent of llm/
     result = analyze(name, root)
-    out = os.path.join(root, "output", name, "analysis.json")
-    with open(out, "w", encoding="utf-8") as f:
+
+    out_dir = os.path.join(root, "output", name)
+    with open(os.path.join(out_dir, "analysis.json"), "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
-    print(f"[analyze] 저장: {out}")
+    with open(os.path.join(out_dir, "analyze_trace.json"), "w", encoding="utf-8") as f:
+        json.dump(TRACE, f, ensure_ascii=False, indent=2, default=str)
+    print(f"[analyze] wrote analysis.json + analyze_trace.json in {out_dir}")
 
 
 if __name__ == "__main__":
