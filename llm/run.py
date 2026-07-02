@@ -5,7 +5,7 @@ from ollama import chat
 
 MODEL = "gemma4:26b"
 MAX_TURNS = 12         # tool 루프 무한방지 (필수 섹션 다 조회 + 결론 낼 여유)
-NUM_CTX = 16384        # 컨텍스트 크기 (tool 결과 누적 + 최종 답 잘림 방지)
+NUM_CTX = 24576        # 컨텍스트 크기 (tier1 주입 + tool 결과 누적 + 보고서까지 여유)
 
 VERDICT_SCHEMA = {
     "type" : "object",
@@ -107,6 +107,13 @@ already judged this capture worth analyzing.
 - Only describe lateral movement when a compromised host directly attacks ANOTHER
   WORKSTATION over an admin channel (e.g. SMB write to ADMIN$/C$, remote service
   creation via svcctl, scheduled task via atsvc, DCSync via drsuapi).
+- PROBE vs EXECUTION — read the dcerpc_ops in lateral_movement literally:
+  `OpenSCManager2` / `ept_map` / share=PIPE with smb_writes=0 is a PROBE or
+  enumeration attempt, NOT successful lateral movement. Escalate to actual
+  lateral movement ONLY when you see `CreateServiceW`/`StartServiceW`,
+  `SchRpcRegister`/`NetrJobAdd`, `DsGetNCChanges`, or a non-zero smb_writes to an
+  admin share. If only probe-level ops with zero writes are present, say
+  "probing attempt, no evidence of execution" and keep the hosts independent.
 - If you cannot tell whether hosts are linked, treat them as independent and mark
   the relationship "unknown". Do not invent a chain to make the story cohere.
 
