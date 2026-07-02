@@ -46,6 +46,9 @@ Grounded in the evidence, determine:
    host was infected FIRST).
 Report every item. If unknown, mark it "unknown" — never omit silently, never fabricate.
 
+# Output
+
+
 # Language
 Reason in English. (The final human-facing report is produced later, in Korean.)
 """
@@ -73,7 +76,7 @@ def chatting(tools):
 
     for _ in range(MAX_TURNS):
         res = chat(model=MODEL, messages=messages, tools=tools.TOOLS,
-                   options={"num_ctx": NUM_CTX})
+                   options={"temperature":0.3, "seed": 42 ,"num_ctx": NUM_CTX})
 
         # tool 을 안 부르면 그게 최종 답
         if not res.message.tool_calls:

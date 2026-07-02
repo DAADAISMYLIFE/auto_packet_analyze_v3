@@ -40,6 +40,9 @@ class Tools:
                 "mac": h.get("mac"),
                 "hostname": h.get("hostname"),
                 "username": h.get("username"),
+                "role": h.get("role"),
+                "scope": h.get("scope"),
+                "ad_domain": h.get("ad_domain"),
             }
             for h in hosts
         ]

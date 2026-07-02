@@ -15,9 +15,15 @@ evidence 빌더 (파이프라인 3단계: 정규화 및 압축)
   - external(ip/도메인/sni)에 first_ts 부착 → 타임라인/patient-zero 재료.
   - 측면이동은 정황 요약만, 상세는 Tier2 드릴다운.
   - 캡 초과분은 조용히 버리지 않고 _truncation 에 기록.
+  - Suricata 디코더 진단("SURICATA ..." / Generic Protocol Command Decode)은
+    위협 alert 가 아니라 캡처 품질 신호 → capture_diagnostics 로 분리.
+  - anomalies = 무시그니처 행동 측정치(비콘 주기, 업로드 비율, odd-port 등).
+    수치만 계산해서 노출, 악성 판단은 LLM 몫. 하한/캡은 크기 제한용이며 _floors 에 명시.
 """
 import json
+import math
 import os
+import statistics
 import sys
 from collections import Counter, defaultdict
 
@@ -26,6 +32,17 @@ CAP_EXTERNAL_DOMAINS = 500
 CAP_EXTERNAL_IPS = 500
 CAP_EXTERNAL_SNI = 300
 CAP_ALERT_SAMPLE_CIDS = 3    # alert 시그니처별 드릴다운용 community_id 표본 수
+
+# ── anomalies 보고 하한/캡 (판단 기준 아님 — 표본 부족·크기 제한용, _floors 로 노출) ──
+ANOM_BEACON_MIN_CONNS = 5    # 이 미만이면 주기(지터) 계산 표본 부족
+ANOM_FANOUT_MIN_DSTS = 5     # 내부 fan-out 보고 하한
+ANOM_LIST_CAP = 15           # 각 목록 최대 길이
+ANOM_ENTROPY_MIN = 3.5       # DGA 후보 보고 하한 (첫 라벨 셰넌 엔트로피)
+WELL_KNOWN_PORTS = {21, 22, 25, 53, 80, 110, 123, 143, 443, 465, 587,
+                    993, 995, 3478, 8080, 8443}
+WS_ODD_EGRESS_PORTS = {25: "smtp", 465: "smtps", 587: "submission",
+                       6667: "irc", 3389: "rdp"}    # 워크스테이션발이면 역할 이탈
+LATERAL_PORTS = {135, 139, 445, 3389, 5985}         # 내부 fan-out 대상 포트
 
 LM_LOGS = ["smb_files.log", "smb_mapping.log", "dce_rpc.log",
            "ldap_search.log", "ldap.log", "kerberos.log", "ntlm.log"]
@@ -66,6 +83,176 @@ def is_real_host(ip):
     return True
 
 
+def is_unicast_mac(mac):
+    """브로드캐스트/멀티캐스트 MAC 제외. 없으면(None) 판단 보류 → True.
+
+    IP 휴리스틱(.255)은 서브넷을 모르면 /25 브로드캐스트(x.x.x.127) 등을 못 잡음
+    → MAC 이 확실한 신호 (whatthef 케이스에서 실증).
+    """
+    if not mac:
+        return True
+    m = mac.lower()
+    return not (m == "ff:ff:ff:ff:ff:ff"
+                or m.startswith("01:00:5e")     # IPv4 multicast
+                or m.startswith("33:33"))       # IPv6 multicast
+
+
+def is_capture_diagnostic(sig, cat):
+    """Suricata 디코더 진단 이벤트 판별 (위협 alert 아님).
+
+    'SURICATA IPv4 invalid checksum' 류는 캡처 호스트의 NIC checksum offloading
+    아티팩트가 대부분 → alerts 에 섞이면 benign pcap 에서 가짜 사건을 유발.
+    """
+    return (sig or "").startswith("SURICATA ") \
+        or cat == "Generic Protocol Command Decode"
+
+
+def shannon_entropy(s):
+    """문자열 셰넌 엔트로피 (DGA 후보 측정용)."""
+    if not s:
+        return 0.0
+    n = len(s)
+    return round(-sum(c / n * math.log2(c / n) for c in Counter(s).values()), 2)
+
+
+def build_anomalies(conn, hosts, dns_recs):
+    """무시그니처 행동 측정 (제로데이 대비 채널).
+
+    원칙: 수치만 계산, 악성 판단 없음 — "얘가 왜 이런 행동을?"의 후보 목록.
+    하한(_floors)은 표본 부족/크기 제한용이며 판단 기준이 아님.
+    """
+    ext = [d for d in conn if d.get("local_resp") is False and d.get("id.resp_h")]
+
+    # 1) 비콘 주기성: 외부 (dst,port)별 연결 간격의 지터. 낮을수록 기계적 주기 접속.
+    grp = defaultdict(list)      # (dst, port) -> [ts...]
+    grp_bytes = defaultdict(int)
+    for d in ext:
+        key = (d["id.resp_h"], d.get("id.resp_p"))
+        if d.get("ts"):
+            grp[key].append(d["ts"])
+        grp_bytes[key] += d.get("orig_bytes") or 0
+    beacons = []
+    for (dst, port), tss in grp.items():
+        if len(tss) < ANOM_BEACON_MIN_CONNS:
+            continue
+        tss.sort()
+        ivals = [b - a for a, b in zip(tss, tss[1:])]
+        mean = statistics.mean(ivals)
+        if mean <= 0:
+            continue
+        stdev = statistics.pstdev(ivals)
+        beacons.append({"dst": dst, "port": port, "conns": len(tss),
+                        "interval_avg_s": round(mean, 2),
+                        "jitter_pct": round(stdev / mean * 100, 1),
+                        "total_bytes_out": grp_bytes[(dst, port)]})
+    beacons.sort(key=lambda x: x["jitter_pct"])         # 기계적인 것부터
+
+    # 2) 업로드 비율: 외부 dst 별 송신/수신 바이트. 송신 압도 = 유출 후보.
+    updown = defaultdict(lambda: {"out": 0, "in": 0, "flows": 0})
+    for d in ext:
+        u = updown[d["id.resp_h"]]
+        u["out"] += d.get("orig_bytes") or 0
+        u["in"] += d.get("resp_bytes") or 0
+        u["flows"] += 1
+    exfil = [{"dst": ip, "bytes_out": u["out"], "bytes_in": u["in"],
+              "ratio": round(u["out"] / u["in"], 1) if u["in"] else None,
+              "flows": u["flows"]}
+             for ip, u in updown.items() if u["out"] > 0]
+    exfil.sort(key=lambda x: -x["bytes_out"])
+
+    # 3) DNS 없는 직결: dns 응답에 등장한 적 없는 외부 IP 접속 (하드코딩 C2 후보).
+    #    주의: 짧은 캡처는 DNS 캐시 때문에 정상도 걸림 → 판단은 LLM 이 캡처 길이 보고.
+    answered = set()
+    for d in dns_recs:
+        for a in d.get("answers") or []:
+            answered.add(a)
+    nodns = defaultdict(lambda: {"conns": 0, "ports": Counter(), "first_ts": None})
+    for d in ext:
+        ip = d["id.resp_h"]
+        if ip in answered:
+            continue
+        e = nodns[ip]
+        e["conns"] += 1
+        e["ports"][d.get("id.resp_p")] += 1
+        ts = d.get("ts")
+        if ts and (e["first_ts"] is None or ts < e["first_ts"]):
+            e["first_ts"] = ts
+    no_dns_direct = [{"dst": ip, "conns": e["conns"], "first_ts": e["first_ts"],
+                      "ports": [p for p, _ in e["ports"].most_common(3)]}
+                     for ip, e in nodns.items()]
+    no_dns_direct.sort(key=lambda x: -x["conns"])
+
+    # 4) odd-port 외부 연결: 잘 알려진 포트 밖으로 나가는 트래픽 (:65400, :2222 류).
+    odd = defaultdict(lambda: {"conns": 0, "first_ts": None})
+    for d in ext:
+        p = d.get("id.resp_p")
+        if p is None or p in WELL_KNOWN_PORTS:
+            continue
+        e = odd[(d["id.resp_h"], p)]
+        e["conns"] += 1
+        ts = d.get("ts")
+        if ts and (e["first_ts"] is None or ts < e["first_ts"]):
+            e["first_ts"] = ts
+    odd_ports = [{"dst": ip, "port": p, "conns": e["conns"], "first_ts": e["first_ts"]}
+                 for (ip, p), e in odd.items()]
+    odd_ports.sort(key=lambda x: -x["conns"])
+
+    # 5) 역할 이탈: 워크스테이션이 SMTP/IRC/RDP 등으로 외부 발신 (역할×행동 기준선).
+    ws = {ip for ip, h in hosts.items() if h.get("role") == "workstation"}
+    dev = defaultdict(lambda: {"conns": 0, "dsts": set()})
+    for d in ext:
+        src, p = d.get("id.orig_h"), d.get("id.resp_p")
+        if src in ws and p in WS_ODD_EGRESS_PORTS:
+            e = dev[(src, p)]
+            e["conns"] += 1
+            e["dsts"].add(d["id.resp_h"])
+    role_deviation = [{"src": src, "port": p, "service": WS_ODD_EGRESS_PORTS[p],
+                       "conns": e["conns"], "distinct_dsts": len(e["dsts"])}
+                      for (src, p), e in dev.items()]
+    role_deviation.sort(key=lambda x: -x["conns"])
+
+    # 6) 내부 fan-out: 한 호스트가 관리 포트로 다수 내부 호스트 접촉 (스캔/측면이동 후보).
+    fan = defaultdict(set)
+    for d in conn:
+        if d.get("local_orig") and d.get("local_resp") \
+           and d.get("id.resp_p") in LATERAL_PORTS:
+            fan[d["id.orig_h"]].add(d["id.resp_h"])
+    internal_fanout = [{"src": src, "distinct_dsts": len(dsts)}
+                       for src, dsts in fan.items()
+                       if len(dsts) >= ANOM_FANOUT_MIN_DSTS]
+    internal_fanout.sort(key=lambda x: -x["distinct_dsts"])
+
+    # 7) DNS 집계: NXDOMAIN 비율(DGA), TXT 다발(터널링), 고엔트로피 질의.
+    total_q = len(dns_recs)
+    nx = sum(1 for d in dns_recs if d.get("rcode_name") == "NXDOMAIN")
+    txt = sum(1 for d in dns_recs if d.get("qtype_name") == "TXT")
+    ent = []
+    for q in {d.get("query") for d in dns_recs if d.get("query")}:
+        label = q.split(".")[0]
+        if len(label) >= 8:
+            e = shannon_entropy(label)
+            if e >= ANOM_ENTROPY_MIN:
+                ent.append({"query": q, "entropy": e})
+    ent.sort(key=lambda x: -x["entropy"])
+
+    cap = ANOM_LIST_CAP
+    return {
+        "_floors": {"beacon_min_conns": ANOM_BEACON_MIN_CONNS,
+                    "fanout_min_dsts": ANOM_FANOUT_MIN_DSTS,
+                    "entropy_min": ANOM_ENTROPY_MIN, "list_cap": cap,
+                    "note": "measurements only — maliciousness is NOT judged here"},
+        "beacons": beacons[:cap],
+        "exfil_candidates": exfil[:cap],
+        "no_dns_direct": no_dns_direct[:cap],
+        "odd_ports": odd_ports[:cap],
+        "role_deviation": role_deviation[:cap],
+        "internal_fanout": internal_fanout[:cap],
+        "dns": {"total_queries": total_q, "nxdomain": nx,
+                "nxdomain_rate": round(nx / total_q, 3) if total_q else None,
+                "txt_queries": txt, "high_entropy": ent[:5]},
+    }
+
+
 # ---------------------------------------------------------------------------
 def build_evidence(name, root="/home/qkekdhd/auto_packet_analyze_v3"):
     base = os.path.join(root, "output", name)
@@ -87,15 +274,20 @@ def build_evidence(name, root="/home/qkekdhd/auto_packet_analyze_v3"):
             cid_of[uid] = d.get("community_id")
 
     # ── suricata eve.json: alert 그룹 (community_id 조인) ──
+    #   디코더 진단(checksum 등)은 위협이 아니므로 분리 — alert_cids(하드 시그널)에도 제외
     eve = read_ndjson(f"{S}/eve.json")
     alert_cids = set()
     sig_stat = {}                # (sig,cat,sev) -> dict(count, first_ts, src, dst, cids)
+    diag_stat = Counter()        # 진단 시그니처 -> count
     for d in eve:
         if d.get("event_type") != "alert":
             continue
+        a = d.get("alert", {})
+        if is_capture_diagnostic(a.get("signature"), a.get("category")):
+            diag_stat[a.get("signature")] += 1
+            continue
         cid = d.get("community_id")
         alert_cids.add(cid)
-        a = d.get("alert", {})
         key = (a.get("signature"), a.get("category"), a.get("severity"))
         st = sig_stat.setdefault(key, {"count": 0, "first_ts": None,
                                        "src": set(), "dst": set(), "cids": []})
@@ -201,7 +393,8 @@ def build_evidence(name, root="/home/qkekdhd/auto_packet_analyze_v3"):
         for ipk, mack, localk in [("id.orig_h", "orig_l2_addr", "local_orig"),
                                   ("id.resp_h", "resp_l2_addr", "local_resp")]:
             ip = d.get(ipk)
-            if not (d.get(localk) and is_real_host(ip)):
+            if not (d.get(localk) and is_real_host(ip)
+                    and is_unicast_mac(d.get(mack))):
                 continue
             h = host_slot(ip)
             if d.get(mack):
@@ -273,8 +466,9 @@ def build_evidence(name, root="/home/qkekdhd/auto_packet_analyze_v3"):
             if ts and (e["first_ts"] is None or ts < e["first_ts"]):
                 e["first_ts"] = ts
 
+    dns_recs = read_ndjson(f"{Z}/dns.log")
     ext_dom = {}         # query -> {first_ts, answers}
-    for d in read_ndjson(f"{Z}/dns.log"):
+    for d in dns_recs:
         q = d.get("query"); ts = d.get("ts")
         if not q or q.endswith(".arpa") or q.endswith(".local"):
             continue
@@ -335,9 +529,12 @@ def build_evidence(name, root="/home/qkekdhd/auto_packet_analyze_v3"):
         },
         "hosts": list(hosts.values()),
         "alerts": alerts,
+        "capture_diagnostics": [{"signature": s, "count": c}
+                                for s, c in diag_stat.most_common()],
         "files": files,
         "external": external,
         "lateral_movement": lateral_movement,
+        "anomalies": build_anomalies(conn, hosts, dns_recs),
         "_truncation": trunc,
     }
     return evidence
@@ -356,9 +553,14 @@ def main():
         json.dump(ev, f, ensure_ascii=False, indent=2)
     size = os.path.getsize(out) / 1024
     print(f"[evidence] {out}  ({size:.1f} KB)")
+    an = ev["anomalies"]
     print(f"  hosts={len(ev['hosts'])} alerts={len(ev['alerts'])} "
+          f"diag={sum(d['count'] for d in ev['capture_diagnostics'])} "
           f"files={len(ev['files'])} ext_ip={len(ev['external']['ips'])} "
           f"ext_dom={len(ev['external']['domains'])} sni={len(ev['external']['sni'])}")
+    print(f"  anomalies: beacons={len(an['beacons'])} exfil={len(an['exfil_candidates'])} "
+          f"no_dns={len(an['no_dns_direct'])} odd_ports={len(an['odd_ports'])} "
+          f"role_dev={len(an['role_deviation'])} fanout={len(an['internal_fanout'])}")
     if ev["_truncation"]:
         print(f"  _truncation={ev['_truncation']}")
 
