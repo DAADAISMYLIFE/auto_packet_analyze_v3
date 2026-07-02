@@ -253,6 +253,74 @@ def build_anomalies(conn, hosts, dns_recs):
     }
 
 
+# SMB 파일 action 중 "쓰기" 계열 (원격 페이로드 투하 = 실제 실행 신호)
+SMB_WRITE_ACTIONS = ("WRITE", "PUT", "CREATE")
+
+
+def build_lateral_movement(Z, hosts, read_ndjson):
+    """내부↔내부 flow를 (src,dst)별로 묶고 실제 operation/share/write 를 부착한다.
+
+    원칙(대화에서 확정): 코드는 '무엇을 했나(operation)'라는 팩트만 배달하고,
+    '그게 공격이냐'는 판단하지 않는다(LLM 몫). dst 역할로만 버킷을 나눈다:
+      - ad_authentication         : dst가 DC/DNS → 정상 AD 인증/조회 (측면이동 아님)
+      - workstation_to_workstation: dst가 워크스테이션 → 진짜 측면이동 후보
+      - unclassified              : dst 역할 불명
+
+    핵심: dcerpc operation 을 pair 에 붙여야 'svcctl OpenSCManager2(정찰)'와
+    'svcctl CreateServiceW(원격 실행)'가 구분됨. 집계된 endpoint 목록으론 불가능.
+    smb_writes(ADMIN$/C$ 쓰기)는 실제 페이로드 투하의 강한 팩트라 함께 노출.
+    """
+    pair = defaultdict(lambda: {"dcerpc_ops": Counter(), "smb_shares": set(),
+                                "smb_writes": [], "events": 0})
+
+    for d in read_ndjson(f"{Z}/dce_rpc.log"):
+        s, dst, op = d.get("id.orig_h"), d.get("id.resp_h"), d.get("operation")
+        if s in hosts and dst in hosts and s != dst and op:
+            p = pair[(s, dst)]
+            p["dcerpc_ops"][op] += 1
+            p["events"] += 1
+
+    for d in read_ndjson(f"{Z}/smb_mapping.log"):
+        s, dst = d.get("id.orig_h"), d.get("id.resp_h")
+        if s in hosts and dst in hosts and s != dst:
+            p = pair[(s, dst)]
+            p["events"] += 1
+            if d.get("share_type"):
+                p["smb_shares"].add(d["share_type"])
+
+    for d in read_ndjson(f"{Z}/smb_files.log"):
+        s, dst = d.get("id.orig_h"), d.get("id.resp_h")
+        act = (d.get("action") or "").upper()
+        if s in hosts and dst in hosts and s != dst \
+           and any(w in act for w in SMB_WRITE_ACTIONS):
+            path = d.get("path") or d.get("name")
+            if path:
+                pair[(s, dst)]["smb_writes"].append(path)
+
+    buckets = {"ad_authentication": [], "workstation_to_workstation": [],
+               "unclassified": []}
+    for (s, dst), p in pair.items():
+        role = hosts[dst].get("role")
+        entry = {"src": s, "dst": dst, "dst_role": role, "events": p["events"],
+                 "dcerpc_ops": [op for op, _ in p["dcerpc_ops"].most_common(12)],
+                 "smb_shares": sorted(p["smb_shares"]),
+                 "smb_writes": p["smb_writes"][:5]}
+        if role in ("domain_controller", "dns_server"):
+            buckets["ad_authentication"].append(entry)
+        elif role == "workstation":
+            buckets["workstation_to_workstation"].append(entry)
+        else:
+            buckets["unclassified"].append(entry)
+    for k in ("ad_authentication", "workstation_to_workstation", "unclassified"):
+        buckets[k].sort(key=lambda x: -x["events"])
+
+    buckets["_note"] = ("dcerpc_ops/smb_writes are facts, not verdicts. svcctl "
+                        "OpenSCManager2 alone is a probe; CreateServiceW or an "
+                        "ADMIN$/C$ smb_write is actual remote execution. "
+                        "ad_authentication is normal AD traffic toward infra.")
+    return buckets
+
+
 # ---------------------------------------------------------------------------
 def build_evidence(name, root="/home/qkekdhd/auto_packet_analyze_v3"):
     base = os.path.join(root, "output", name)
@@ -336,38 +404,13 @@ def build_evidence(name, root="/home/qkekdhd/auto_packet_analyze_v3"):
     if dropped_ssl:
         trunc["files_ssl_excluded"] = dropped_ssl
 
-    # ── 측면이동 로그: uid 집합 + 정황 요약 ──
+    # ── 측면이동 로그: uid 집합 (하드 시그널 판정용). 프로파일은 role 확정 후 조립 ──
+    #   (lateral_movement 구조는 dst 역할이 필요 → hosts/role 확정 뒤 build_lateral_movement)
     lm_uids = set()
-    lm_records = {}
     for lg in LM_LOGS:
-        recs = read_ndjson(f"{Z}/{lg}")
-        lm_records[lg] = recs
-        for r in recs:
+        for r in read_ndjson(f"{Z}/{lg}"):
             if r.get("uid"):
                 lm_uids.add(r["uid"])
-
-    def internal_pairs(recs, limit=10):
-        pairs = Counter()
-        for r in recs:
-            s, d = r.get("id.orig_h"), r.get("id.resp_h")
-            if s and d:
-                pairs[(s, d)] += 1
-        return [[s, d] for (s, d), _ in pairs.most_common(limit)]
-
-    def top_field(recs, field, limit=8):
-        c = Counter(r.get(field) for r in recs if r.get(field))
-        return [k for k, _ in c.most_common(limit)]
-
-    smb_recs = lm_records["smb_files.log"] + lm_records["smb_mapping.log"]
-    lateral_movement = {
-        "smb": {"events": len(smb_recs),
-                "internal_pairs": internal_pairs(smb_recs),
-                "shares": top_field(lm_records["smb_mapping.log"], "share_type")},
-        "dcerpc": {"events": len(lm_records["dce_rpc.log"]),
-                   "top_endpoints": top_field(lm_records["dce_rpc.log"], "endpoint")},
-        "ldap": {"searches": len(lm_records["ldap_search.log"])},
-        "kerberos": {"events": len(lm_records["kerberos.log"])},
-    }
 
     # ── 하드 시그널 분할 (전부 boolean) ──
     hard, noise = 0, 0
@@ -455,6 +498,9 @@ def build_evidence(name, root="/home/qkekdhd/auto_packet_analyze_v3"):
             h["role"] = "dns_server"
         elif h["username"]:
             h["role"] = "workstation"
+
+    # ── 측면이동 프로파일: (src,dst)별 실제 operation/share/write 부착, dst 역할로 분류 ──
+    lateral_movement = build_lateral_movement(Z, hosts, read_ndjson)
 
     # ── external (목표2/4/5): ip/도메인/sni + first_ts ──
     ext_ip = {}          # ip -> {first_ts, conns}
