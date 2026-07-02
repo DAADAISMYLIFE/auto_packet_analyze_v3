@@ -138,30 +138,38 @@ class Tools:
         sni = [s for s in ext.get("sni", []) if k in s.get("sni", "").lower()]
         return {"ips": ips[:30], "domains": doms[:30], "sni": sni[:30]}
 
+    # 멀웨어 후보로 취급할 mime (부분일치) — 이 외의 파일은 mime별 집계로만 요약
+    #   주의: "zip" 같은 짧은 토큰은 x-gzip(HTTP 압축 응답 노이즈)까지 잡으므로 "/zip", "x-zip" 사용
+    INTERESTING_MIME = ("x-dosexec", "x-executable", "x-dosdriver", "/zip", "x-zip", "rar",
+                        "x-7z", "msdownload", "ms-pol", "x-msi", "java-archive",
+                        "vbs", "powershell", "x-sh", "hta")
+
     def get_files(self):
         """Collect transferred files.
 
-        Returns exchanged files (sha256, md5, mime, bytes, source, first_ts) — malware candidates.
+        Returns malware-candidate files (executables/archives/scripts) in full, and
+        summarizes the rest per mime (count/total_bytes) to keep the context small.
         """
-
-        # 1. files 필드 파싱
         files = self.evidence.get("files", [])
-
-        # 2. 정보 가져오기
-        result = [
-            {
-                "sha256": f.get("sha256"),
-                "md5": f.get("md5"),
-                "mime": f.get("mime"),
-                "bytes": f.get("bytes"),
-                "sources": f.get("sources"),
-                "first_ts": f.get("first_ts"),
-            }
-            for f in files
-        ]
-
-        # 3. return
-        return result
+        interesting, background = [], {}
+        for f in files:
+            mime = f.get("mime") or "unknown"
+            if any(k in mime for k in self.INTERESTING_MIME):
+                interesting.append({
+                    "sha256": f.get("sha256"),
+                    "mime": mime,
+                    "bytes": f.get("bytes"),
+                    "first_ts": f.get("first_ts"),
+                    "sources": f.get("sources"),
+                    "community_id": (f.get("community_ids") or [None])[0],
+                })
+            else:  # 노이즈(윈도우 업데이트 CAB, OCSP, text 등)는 건수/용량만
+                b = background.setdefault(mime, {"count": 0, "total_bytes": 0})
+                b["count"] += 1
+                b["total_bytes"] += f.get("bytes") or 0
+        return {"malware_candidates": interesting,
+                "background_by_mime": background,
+                "note": "background files are summarized; drill down if needed"}
 
     def get_lateral_movement(self):
         """Collect lateral-movement signals.
