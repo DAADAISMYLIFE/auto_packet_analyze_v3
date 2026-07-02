@@ -169,13 +169,11 @@ def triage(tools):
     }, ensure_ascii=False, default=str)
 
     res = chat(model=MODEL, format=VERDICT_SCHEMA,   # ← format이 강제 선택
+            think=False,                              # thinking 끔: content가 바로 JSON, 추론토큰이 예산 안 먹음
             messages=[{"role": "system", "content": SYSTEM_PROMPT_TRIAGE},
                         {"role": "user", "content": "Triage this capture.\n\n# Tier-1 Evidence\n" + tier1_evidence}],
-            # num_predict: verdict+grounds 6개면 충분. 문법강제 반복루프가 nc_ctx까지
-            #   폭주하는 걸 물리적으로 캡 → 잘려도 아래 try/except 가 suspicious 로 받음.
-            # repeat_penalty: 문법강제 하 grounds 배열 반복루프 억제
-            options={"temperature": 0.3, "seed": 42, "num_ctx": NUM_CTX,
-                     "num_predict": 400, "repeat_penalty": 1.3})
+            options={"temperature": 0.3, "seed": 42, "num_ctx": NUM_CTX,}
+            )
 
     content = res.message.content
     try:
@@ -187,8 +185,9 @@ def triage(tools):
             print(f"[triage] JSON 잘림 — verdict 복구: {m.group(1)}")
             return {"verdict": m.group(1),
                     "grounds": ["(grounds 폭주로 잘림 — verdict 만 복구)"]}
-        print("[triage] verdict 복구 실패 — suspicious 폴백 (원문 앞부분):")
-        print(content[:300])
+        print("[triage] verdict 복구 실패 — suspicious 폴백")
+        print("  content(repr):", repr(content[:200]))   # 비었나/뭐가왔나 진단용
+        print("  thinking 있었나:", bool(getattr(res.message, "thinking", None)))
         return {"verdict": "suspicious",
                 "grounds": ["triage 출력 파싱 실패 — 안전을 위해 분석 단계로 에스컬레이트"]}
 
