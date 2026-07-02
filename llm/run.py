@@ -1,6 +1,7 @@
-import sys, json
+import sys, json, re
 
 from tools import Tools
+from validate import check_iocs, format_findings
 from ollama import chat
 
 MODEL = "gemma4:26b"
@@ -172,13 +173,22 @@ def triage(tools):
                         {"role": "user", "content": "Triage this capture.\n\n# Tier-1 Evidence\n" + tier1_evidence}],
             # num_predict: verdict+grounds 6개면 충분. 문법강제 반복루프가 nc_ctx까지
             #   폭주하는 걸 물리적으로 캡 → 잘려도 아래 try/except 가 suspicious 로 받음.
-            options={"temperature": 0.3, "seed": 42, "num_ctx": NUM_CTX, "num_predict": 400})
+            # repeat_penalty: 문법강제 하 grounds 배열 반복루프 억제
+            options={"temperature": 0.3, "seed": 42, "num_ctx": NUM_CTX,
+                     "num_predict": 400, "repeat_penalty": 1.3})
 
+    content = res.message.content
     try:
-        return json.loads(res.message.content)
+        return json.loads(content)
     except json.JSONDecodeError:
-        print("[triage] JSON 파싱 실패 — suspicious로 폴백 (원문 앞부분):")
-        print(res.message.content[:300])
+        # grounds 폭주로 JSON 이 잘려도 verdict 는 맨 앞이라 살아있음 → 정규식으로 복구
+        m = re.search(r'"verdict"\s*:\s*"(no_incident|suspicious|confirmed)"', content)
+        if m:
+            print(f"[triage] JSON 잘림 — verdict 복구: {m.group(1)}")
+            return {"verdict": m.group(1),
+                    "grounds": ["(grounds 폭주로 잘림 — verdict 만 복구)"]}
+        print("[triage] verdict 복구 실패 — suspicious 폴백 (원문 앞부분):")
+        print(content[:300])
         return {"verdict": "suspicious",
                 "grounds": ["triage 출력 파싱 실패 — 안전을 위해 분석 단계로 에스컬레이트"]}
 
@@ -243,8 +253,13 @@ def main():
             print(f"  - {g}")
         print("잔여 리스크: 본 판정은 시그니처+행동 휴리스틱 커버리지 내에서만 유효함.")
         return
-    
-    forensic(tools)
+
+    report = forensic(tools)
+
+    # 4. IOC 검증 게이트: 보고서의 IP/도메인/해시를 evidence 와 대조 (오염·환각 차단)
+    if report:
+        print()
+        print(format_findings(check_iocs(report, tools.evidence)))
 
 if __name__ == "__main__":
     main()
