@@ -20,8 +20,7 @@ class Tools:
             self.evidence = json.load(f)
             
         # tool 등록 
-        self.TOOLS = [self.get_hosts_info, self.get_host_info, self.get_alerts, self.get_alerts_by_severity,
-                      self.get_external, self.search_external, self.get_files, self.get_lateral_movement]
+        self.TOOLS = [self.get_host_info, self.get_alerts_by_severity, self.search_external]
         self.AVAILABLE = {fn.__name__: fn for fn in self.TOOLS}
 
 

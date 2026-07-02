@@ -51,13 +51,24 @@ Reason in English. (The final human-facing report is produced later, in Korean.)
 """
 
 def chatting(tools):
+    # tier1 정보 주입
+    tier1_evidence = json.dumps({
+        "hosts": tools.get_hosts_info(),
+        "alerts" : tools.get_alerts(),
+        "external" : tools.get_external(),
+        "files" : tools.get_files(),
+        "lateral_movement" : tools.get_lateral_movement(),
+    }, ensure_ascii=False, default=str)
+
+
+
     # 채팅 기본 구조
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user",
-         "content": "Analyze this incident. Gather the Tier-1 evidence with the tools, "
-                    "then report the victims, attacker/IOCs, malware per host, and the "
-                    "infection timeline."},
+         "content": "Analyze this incident. The Tier-1 evidence is below. Use the drill-down "
+                    "tools only for follow-up questions, then report the victims, attacker/IOCs, "
+                    "malware per host, and the infection timeline.\n\n# Tier-1 Evidence\n" + tier1_evidence},
     ]
 
     for _ in range(MAX_TURNS):
