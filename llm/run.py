@@ -1,7 +1,6 @@
 import sys, json, re, os
 
 from tools import Tools
-from report_render import render, REPORT_SCHEMA
 from ollama import chat
 
 MODEL = "gemma4:26b"
@@ -154,22 +153,41 @@ Address every `anomalies` entry: either connect it to the incident or dismiss it
 with a stated reason. Report every item. If unknown, mark it "unknown" — never
 omit silently, never fabricate.
 
-# Output (final step)
-When tool use is finished you will be asked for the FINAL report as a single JSON
-object with these fields (a deterministic renderer turns it into the report — do NOT
-write Markdown yourself):
-- executive_summary: 1-2 sentences (which host/user, what malware/incident, when UTC).
-- victims: [{ip, status, note?}]. status e.g. "compromised" or
-  "infrastructure (not compromised)". List every internal host, including infra.
-- attacker_ips: [{ip, role}]. role in {C2, delivery, exfil, recon, unknown}.
-- domains: [attacker/precursor domains].
-- malware_behavior: [{host, detail}] per compromised host (family from signature only).
-- timeline: [{ts, event}], time-ordered (UTC); mark which host was infected FIRST.
-- anomaly_analysis: [strings]; for every anomalies entry, link it to the incident or
-  dismiss it with a reason (grouped statements are fine).
-- assessment: verdict recap + one line on coverage limits.
-Copy all IP/domain values EXACTLY from the evidence — the renderer drops any value not
-found in the evidence, so a mistyped IP simply vanishes from the report.
+# Output format
+Return the report in Markdown with EXACTLY these sections, in this order and with
+these headers. Never rename, reorder, add, or drop a section. If a section has no
+content, write "None identified." under it. Copy all IP/domain/hash values verbatim
+from the evidence.
+
+## Executive Summary
+One or two sentences: which host/user, what malware or incident, and when (UTC).
+
+## 1. Victims / Internal Hosts
+A Markdown table with these exact columns:
+| IP | MAC | Hostname | Username | Role | Status |
+One row per internal host. Infrastructure (domain controller / DNS / DHCP / gateway)
+gets Status "infrastructure (not compromised)" unless the evidence shows it was
+itself compromised.
+
+## 2. Attacker Endpoints & IOCs
+- **External IPs:** bullet list, each tagged with its role (C2 / delivery / exfil).
+- **Domains:** bullet list.
+- **File hashes:** sha256/md5 bullet list, or "None in evidence."
+
+## 3. Malware & Attack Behavior (per host)
+For each compromised host: malware family (from the alert signature only), and its
+behavior (download / C2 / lateral movement).
+
+## 4. Infection Timeline
+Numbered, time-ordered (UTC). Explicitly mark which host was infected FIRST.
+
+## 5. Anomaly Analysis
+For every entry in `anomalies`: either link it to the incident (state why) or dismiss
+it (state why). Do not leave any anomaly unaddressed.
+
+## 6. Assessment & Limitations
+Recap the verdict, and one line noting coverage limits (signature + behavior only;
+encrypted payload contents are not inspected).
 
 # Language
 Reason in English. (The final human-facing report is produced later, in Korean.)
@@ -229,37 +247,27 @@ def forensic(tools):
                     "malware per host, and the infection timeline.\n\n# Tier-1 Evidence\n" + tier1_evidence},
     ]
 
-    # ── Phase 1: tool 루프로 정보 수집 (format 없음 → tool 호출 가능) ──
     for _ in range(MAX_TURNS):
         res = chat(model=MODEL, messages=messages, tools=tools.TOOLS,
                    options={"temperature":0.3, "seed": 42 ,"num_ctx": NUM_CTX})
-        messages.append(res.message)          # assistant 턴 누적
+
+        # tool 을 안 부르면 그게 최종 답
         if not res.message.tool_calls:
-            break                              # 더 조회 안 함 → 수집 종료
+            print(res.message.content)
+            return res.message.content
+    
+        # 모델의 tool_call 기록 누적
+        messages.append(res.message)
         for tc in res.message.tool_calls:
             name = tc.function.name
             fn = tools.AVAILABLE.get(name)
             result = fn(**tc.function.arguments) if fn else {"error": f"unknown tool: {name}"}
             print(f"[tool] {name}({dict(tc.function.arguments)})")
+            # 결과를 role:tool 로 주입 → 다음 chat 에서 모델이 보고 이어감
             messages.append({"role": "tool", "tool_name": name,
                              "content": json.dumps(result, ensure_ascii=False, default=str)})
-    else:
-        print("(max turns reached)")
 
-    # ── Phase 2: 구조화 리포트 강제 (tools 제거 + format 강제 + thinking 끔) ──
-    #   tools 와 format 을 같이 쓰면 충돌하므로 수집이 끝난 뒤 별도 호출로 JSON 만 받음.
-    messages.append({"role": "user",
-        "content": "Tool use is complete. Output the FINAL report now as a single JSON "
-                   "object matching the required schema. Copy every IP/domain exactly "
-                   "from the evidence."})
-    res = chat(model=MODEL, format=REPORT_SCHEMA, think=False, messages=messages,
-               options={"temperature": 0.3, "seed": 42, "num_ctx": NUM_CTX})
-    try:
-        return json.loads(res.message.content)
-    except json.JSONDecodeError:
-        print("[forensic] 구조화 JSON 파싱 실패 — content(repr):",
-              repr((res.message.content or "")[:300]))
-        return None
+    print("(max turns reached)")
 
 def main():
     # 1. 매개변수로 어떤 evidence파일인지 입력 받기
@@ -280,34 +288,16 @@ def main():
         print("잔여 리스크: 본 판정은 시그니처+행동 휴리스틱 커버리지 내에서만 유효함.")
         return
 
-    report_json = forensic(tools)
-    if not report_json:
-        print("[main] 리포트 생성 실패 — 종료")
-        return
+    report = forensic(tools)
 
-    # 결정론 렌더: evidence 대조 후 마크다운. 오염 IOC는 rejected 로 빠짐.
-    md, rejected, warnings = render(report_json, tools.evidence,
-                                    tools.get_files()["malware_candidates"])
-
-    ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    outdir = os.path.join(ROOT, "reports")
-    os.makedirs(outdir, exist_ok=True)
-    path = os.path.join(outdir, f"{filename}.md")
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(md)
-    print(f"[report] 저장됨 → {path}")
-
-    # 검토 참고(범위 불완전 — 정책은 안전): 사람 o/x 판단에 노출
-    for w in warnings:
-        print(f"[review] ⚠️ {w}")
-
-    # IOC 검증 게이트: evidence 미검증 값이 있으면 차단정책 자동적용 보류(하드블록)
-    if rejected:
-        print(f"[ioc-gate] ⚠️ evidence 미검증 IOC {len(rejected)}건 — 차단정책 자동적용 보류:")
-        for kind, val in rejected:
-            print(f"  - [{kind}] {val!r}")
-    else:
-        print("[ioc-gate] ✅ 모든 IOC evidence 검증 통과")
+    if report:
+        ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        outdir = os.path.join(ROOT, "reports")
+        os.makedirs(outdir, exist_ok=True)
+        path = os.path.join(outdir, f"{filename}.md")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(report)
+        print(f"[report] 저장됨 → {path}")
 
 if __name__ == "__main__":
     main()
