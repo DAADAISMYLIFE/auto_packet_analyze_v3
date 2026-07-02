@@ -61,6 +61,7 @@ def chatting(tools):
         "external" : tools.get_external(),
         "files" : tools.get_files(),
         "lateral_movement" : tools.get_lateral_movement(),
+        "anomalies" : tools.get_anomalies()
     }, ensure_ascii=False, default=str)
 
 

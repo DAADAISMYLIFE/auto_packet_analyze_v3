@@ -182,3 +182,11 @@ class Tools:
 
         # 1. lateral_movement 필드 파싱 후 return
         return self.evidence.get("lateral_movement", {})
+
+
+    def get_anomalies(self):
+        """Collect signature-less behavioral measurements (beacon jitter, upload
+        ratio, no-DNS direct connects, odd ports, role deviation, DNS entropy).
+        """
+        
+        return self.evidence.get("anomalies", {})
