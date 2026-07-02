@@ -10,15 +10,28 @@ LLM 보고서에 나온 IP/도메인/해시를 evidence 의 실제 관측값과 
 """
 import re
 
-# IP 후보: 첫/마지막 옥텟이 숫자인 4-마디 토큰 (정상 + 오염 둘 다 포착)
-#   172.6gan.139.101 / 67.2inet.228.199 같은 오염도 잡히도록 중간 옥텟은 영숫자 허용
-_IP_CAND = re.compile(r'\b\d{1,3}\.[0-9A-Za-z]{1,9}\.[0-9A-Za-z]{1,9}\.\d{1,3}\b')
+# 4-마디 점 토큰 (정상 IP + 오염 IP + 4-라벨 도메인 전부 후보로 수집)
+#   옥텟을 전부 영숫자 허용 → 6seb.60.35.141(첫옥텟), 172.6gan.139.101(중간),
+#   67.2inet.228.199(중간) 등 위치 불문 오염을 놓치지 않음. 도메인은 _ip_like 로 걸러냄.
+_DOTTED = re.compile(r'\b[0-9A-Za-z]{1,15}(?:\.[0-9A-Za-z]{1,15}){3}\b')
 _DOMAIN = re.compile(r'\b(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}\b')
 _SHA256 = re.compile(r'\b[a-fA-F0-9]{64}\b')
 _MD5 = re.compile(r'\b[a-fA-F0-9]{32}\b')
 
 # 도메인 오탐 억제: 파일명/식별자 등 흔한 비-IOC 접미사
 _DOMAIN_STOP = {"e.g", "i.e", "etc", "0.0", "microsoft.com", "example.com"}
+
+
+def _ip_like(tok):
+    """4-마디 토큰이 'IP 이려던 것'인지 (4-라벨 도메인과 구분).
+
+    IP 는 마지막 옥텟이 숫자고 대부분 옥텟이 숫자다. 도메인(a.b.c.com)은 끝이 문자 TLD.
+    → 마지막 옥텟 숫자 + 숫자 옥텟 >=2 이면 IP 후보로 본다.
+    """
+    g = tok.split(".")
+    if len(g) != 4 or not g[3].isdigit():
+        return False
+    return sum(p.isdigit() for p in g) >= 2
 
 
 def _valid_ip(tok):
@@ -90,7 +103,9 @@ def check_iocs(report, evidence):
             findings.append({"kind": kind, "value": value, "detail": detail})
 
     # ── IP ──
-    for tok in _IP_CAND.findall(report):
+    for tok in _DOTTED.findall(report):
+        if not _ip_like(tok):          # 4-라벨 도메인/노이즈 → IP 아님, 건너뜀
+            continue
         if _valid_ip(tok):
             if tok not in truth["ips"]:
                 add("ungrounded_ip", tok, "evidence 에 없는 IP (환각 또는 오타)")
