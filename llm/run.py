@@ -7,17 +7,92 @@ MODEL = "gemma4:26b"
 MAX_TURNS = 12         # tool 루프 무한방지 (필수 섹션 다 조회 + 결론 낼 여유)
 NUM_CTX = 16384        # 컨텍스트 크기 (tool 결과 누적 + 최종 답 잘림 방지)
 
+VERDICT_SCHEMA = {
+    "type" : "object",
+    "properties": {
+        "verdict": {"enum": ["no_incident", "suspicious", "confirmed"]},
+        "grounds": {"type": "array", "items": {"type": "string"},
+                    "description": "specific evidence values that drove the verdict"},
+    },
+    "required" : ["verdict","grounds"]
+}
+
+SYSTEM_PROMPT_TRIAGE = """\
+# Role
+You are the TRIAGE stage of an automated pcap-analysis pipeline. Your ONLY job is
+to decide whether this capture contains evidence of a security incident. You do
+NOT write a report. A separate stage performs deep analysis ONLY if you escalate.
+
+# How to weigh the evidence
+1. alerts       — threat signatures. (capture_diagnostics are NOT threats — they
+                  are capture artifacts such as NIC checksum offloading.)
+2. files        — malware-candidate transfers.
+3. anomalies    — signature-less measurements. Raw numbers, not verdicts. Judge
+                  with context:
+                  - ABSOLUTE volume matters: a high upload ratio on a few KB is
+                    normal client traffic, not exfiltration.
+                  - a short capture (see meta/duration) makes beacon and DNS
+                    heuristics unreliable.
+                  - well-known cloud/CDN/NTP endpoints are usually background.
+4. lateral_movement — routine AD traffic toward infrastructure (DC/DNS/DHCP)
+                  is normal, not an attack.
+
+# Verdict rules
+- no_incident: no threat alerts, no malware-candidate files, and every anomaly has
+  a mundane explanation. For clean traffic this is the EXPECTED verdict — absence
+  of findings is a valid, correct result. Do NOT invent threats to fill sections.
+- suspicious: no signature hits, but at least one behavioral signal lacks an
+  innocent explanation (sustained low-jitter beaconing, workstation SMTP burst,
+  large-volume upload to a first-seen endpoint, high-entropy DNS at scale).
+- confirmed: threat-signature alerts and/or malware-candidate files, corroborated
+  by behavior.
+
+Quote evidence values in grounds exactly as written — never re-type from memory.
+
+# Examples (illustrative values only — NOT from this capture)
+Input (excerpt):
+  {"meta": {"duration_s": 15.0}, "alerts": [], "files": [],
+   "anomalies": {"beacons": [],
+                 "exfil_candidates": [{"dst": "203.0.113.7", "bytes_out": 15200,
+                                       "bytes_in": 600, "ratio": 25.3}]}}
+Output:
+  {"verdict": "no_incident",
+   "grounds": ["no threat alerts and no malware-candidate files",
+               "upload ratio 25.3 to 203.0.113.7 is only 15200 bytes total — normal client traffic, not exfiltration",
+               "capture duration 15.0s is too short for beacon/DNS heuristics"]}
+
+Input (excerpt):
+  {"alerts": [],
+   "anomalies": {"role_deviation": [{"src": "192.0.2.10", "service": "smtp",
+                                     "conns": 180, "distinct_dsts": 70}]}}
+Output:
+  {"verdict": "suspicious",
+   "grounds": ["workstation 192.0.2.10 initiated smtp to 70 distinct external hosts (180 conns) — spam-module behavior with no innocent explanation in the evidence"]}
+
+Input (excerpt):
+  {"alerts": [{"signature": "ET MALWARE Example RAT CnC Checkin", "severity": 1,
+               "count": 12, "dst_ips": ["198.51.100.9"]}],
+   "files": [{"mime": "application/x-dosexec", "sha256": "ab12cd34..."}]}
+Output:
+  {"verdict": "confirmed",
+   "grounds": ["severity-1 alert 'ET MALWARE Example RAT CnC Checkin' fired 12 times toward 198.51.100.9",
+               "executable transfer (application/x-dosexec, sha256 ab12cd34...) corroborates infection"]}
+"""
+
 SYSTEM_PROMPT = """\
 # Role
 You are a network forensics analyst in an automated pcap-analysis pipeline.
 Suricata and Zeek have already processed the capture. The complete Tier-1 evidence
-summary (hosts, alerts, external contacts, files, lateral-movement signals) is
-ALREADY included in the first user message. Read it carefully before doing anything.
+summary (hosts, alerts, external contacts, files, lateral-movement signals, and
+signature-less behavioral measurements in `anomalies`) is ALREADY included in the
+first user message. Read it carefully before doing anything. A triage stage has
+already judged this capture worth analyzing.
 
 # Grounding rules (strict)
 - Base every conclusion ONLY on the provided evidence and tool results.
 - NEVER invent IPs, domains, hashes, hostnames, or usernames. If a value is not in
-  the evidence or a tool result, do not output it.
+  the evidence or a tool result, do not output it. Copy values exactly — never
+  re-type from memory.
 - If something is unknown, say "unknown". Do not guess.
 - Malware family names come from the alert 'signature' text. Do not attribute any
   malware that no signature or IOC supports.
@@ -44,17 +119,15 @@ Grounded in the evidence, determine:
 3. Malware and attack behavior per host (download / C2 / lateral movement).
 4. Infection chain as a time-ordered scenario (use the ts fields; identify which
    host was infected FIRST).
-Report every item. If unknown, mark it "unknown" — never omit silently, never fabricate.
-
-# Output
-
+Address every `anomalies` entry: either connect it to the incident or dismiss it
+with a stated reason. Report every item. If unknown, mark it "unknown" — never
+omit silently, never fabricate.
 
 # Language
 Reason in English. (The final human-facing report is produced later, in Korean.)
 """
 
-def chatting(tools):
-    # tier1 정보 주입
+def triage(tools):
     tier1_evidence = json.dumps({
         "hosts": tools.get_hosts_info(),
         "alerts" : tools.get_alerts(),
@@ -64,6 +137,24 @@ def chatting(tools):
         "anomalies" : tools.get_anomalies()
     }, ensure_ascii=False, default=str)
 
+    res = chat(model=MODEL, format=VERDICT_SCHEMA,   # ← format이 강제 선택
+            messages=[{"role": "system", "content": SYSTEM_PROMPT_TRIAGE},
+                        {"role": "user", "content": "Triage this capture.\n\n# Tier-1 Evidence\n" + tier1_evidence}],
+            options={"temperature": 0.3, "seed": 42, "num_ctx": NUM_CTX})
+
+    return json.loads(res.message.content)
+
+
+def forensic(tools):
+    # tier1 정보 주입
+    tier1_evidence = json.dumps({
+        "hosts": tools.get_hosts_info(),
+        "alerts" : tools.get_alerts(),
+        "external" : tools.get_external(),
+        "files" : tools.get_files(),
+        "lateral_movement" : tools.get_lateral_movement(),
+        "anomalies" : tools.get_anomalies()
+    }, ensure_ascii=False, default=str)
 
 
     # 채팅 기본 구조
@@ -105,7 +196,18 @@ def main():
     tools = Tools(filename)
 
     # 3. 응답 요청
-    chatting(tools)
+    res = triage(tools)
+
+    if res["verdict"] == "no_incident":
+        # 무혐의: 분석 chat 안 감 (사건 전제 프레이밍 차단)
+        print("=== 판정: 이상 없음 ===")
+        print("근거:")
+        for g in res["grounds"]:
+            print(f"  - {g}")
+        print("잔여 리스크: 본 판정은 시그니처+행동 휴리스틱 커버리지 내에서만 유효함.")
+        return
+    
+    forensic(tools)
 
 if __name__ == "__main__":
     main()

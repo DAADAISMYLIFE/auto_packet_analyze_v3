@@ -188,5 +188,5 @@ class Tools:
         """Collect signature-less behavioral measurements (beacon jitter, upload
         ratio, no-DNS direct connects, odd ports, role deviation, DNS entropy).
         """
-        
+
         return self.evidence.get("anomalies", {})
