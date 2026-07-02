@@ -1,7 +1,6 @@
 import sys, json, re
 
 from tools import Tools
-from validate import check_iocs, format_findings
 from ollama import chat
 
 MODEL = "gemma4:26b"
@@ -253,12 +252,7 @@ def main():
         print("잔여 리스크: 본 판정은 시그니처+행동 휴리스틱 커버리지 내에서만 유효함.")
         return
 
-    report = forensic(tools)
-
-    # 4. IOC 검증 게이트: 보고서의 IP/도메인/해시를 evidence 와 대조 (오염·환각 차단)
-    if report:
-        print()
-        print(format_findings(check_iocs(report, tools.evidence)))
+    forensic(tools)
 
 if __name__ == "__main__":
     main()
