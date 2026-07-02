@@ -7,6 +7,7 @@ pcaps/
 
 # 분석 산출물
 output/
+reports/
 
 # 정답지 (MTA 저작물 — 공개 레포에 올리지 않음)
 answers/

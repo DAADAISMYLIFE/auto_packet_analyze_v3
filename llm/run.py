@@ -1,4 +1,4 @@
-import sys, json, re
+import sys, json, re, os
 
 from tools import Tools
 from ollama import chat
@@ -153,6 +153,42 @@ Address every `anomalies` entry: either connect it to the incident or dismiss it
 with a stated reason. Report every item. If unknown, mark it "unknown" — never
 omit silently, never fabricate.
 
+# Output format
+Return the report in Markdown with EXACTLY these sections, in this order and with
+these headers. Never rename, reorder, add, or drop a section. If a section has no
+content, write "None identified." under it. Copy all IP/domain/hash values verbatim
+from the evidence.
+
+## Executive Summary
+One or two sentences: which host/user, what malware or incident, and when (UTC).
+
+## 1. Victims / Internal Hosts
+A Markdown table with these exact columns:
+| IP | MAC | Hostname | Username | Role | Status |
+One row per internal host. Infrastructure (domain controller / DNS / DHCP / gateway)
+gets Status "infrastructure (not compromised)" unless the evidence shows it was
+itself compromised.
+
+## 2. Attacker Endpoints & IOCs
+- **External IPs:** bullet list, each tagged with its role (C2 / delivery / exfil).
+- **Domains:** bullet list.
+- **File hashes:** sha256/md5 bullet list, or "None in evidence."
+
+## 3. Malware & Attack Behavior (per host)
+For each compromised host: malware family (from the alert signature only), and its
+behavior (download / C2 / lateral movement).
+
+## 4. Infection Timeline
+Numbered, time-ordered (UTC). Explicitly mark which host was infected FIRST.
+
+## 5. Anomaly Analysis
+For every entry in `anomalies`: either link it to the incident (state why) or dismiss
+it (state why). Do not leave any anomaly unaddressed.
+
+## 6. Assessment & Limitations
+Recap the verdict, and one line noting coverage limits (signature + behavior only;
+encrypted payload contents are not inspected).
+
 # Language
 Reason in English. (The final human-facing report is produced later, in Korean.)
 """
@@ -252,7 +288,16 @@ def main():
         print("잔여 리스크: 본 판정은 시그니처+행동 휴리스틱 커버리지 내에서만 유효함.")
         return
 
-    forensic(tools)
+    report = forensic(tools)
+
+    if report:
+        ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        outdir = os.path.join(ROOT, "reports")
+        os.makedirs(outdir, exist_ok=True)
+        path = os.path.join(outdir, f"{filename}.md")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(report)
+        print(f"[report] 저장됨 → {path}")
 
 if __name__ == "__main__":
     main()
