@@ -78,10 +78,10 @@ class Tools:
                 "signature": a.get("signature"),
                 "category": a.get("category"),
                 "severity": a.get("severity"),
-                "severity": a.get("count"),
-                "severity": a.get("first_ts"),
-                "severity": a.get("src_ips"),
-                "severity": a.get("dst_ips"),
+                "count": a.get("count"),
+                "first_ts": a.get("first_ts"),
+                "src_ips": a.get("src_ips"),
+                "dst_ips": a.get("dst_ips"),
             }
             for a in alerts
         ]
