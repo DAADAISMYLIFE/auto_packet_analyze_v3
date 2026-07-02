@@ -12,6 +12,7 @@ VERDICT_SCHEMA = {
     "properties": {
         "verdict": {"enum": ["no_incident", "suspicious", "confirmed"]},
         "grounds": {"type": "array", "items": {"type": "string"},
+                    "maxItems": 6,
                     "description": "specific evidence values that drove the verdict"},
     },
     "required" : ["verdict","grounds"]
@@ -162,10 +163,17 @@ def triage(tools):
     res = chat(model=MODEL, format=VERDICT_SCHEMA,   # ← format이 강제 선택
             messages=[{"role": "system", "content": SYSTEM_PROMPT_TRIAGE},
                         {"role": "user", "content": "Triage this capture.\n\n# Tier-1 Evidence\n" + tier1_evidence}],
-            options={"temperature": 0.3, "seed": 42, "num_ctx": NUM_CTX})
+            # num_predict: verdict+grounds 6개면 충분. 문법강제 반복루프가 nc_ctx까지
+            #   폭주하는 걸 물리적으로 캡 → 잘려도 아래 try/except 가 suspicious 로 받음.
+            options={"temperature": 0.3, "seed": 42, "num_ctx": NUM_CTX, "num_predict": 400})
 
-    return json.loads(res.message.content)
-
+    try:
+        return json.loads(res.message.content)
+    except json.JSONDecodeError:
+        print("[triage] JSON 파싱 실패 — suspicious로 폴백 (원문 앞부분):")
+        print(res.message.content[:300])
+        return {"verdict": "suspicious",
+                "grounds": ["triage 출력 파싱 실패 — 안전을 위해 분석 단계로 에스컬레이트"]}
 
 def forensic(tools):
     # tier1 정보 주입
