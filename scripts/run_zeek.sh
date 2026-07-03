@@ -33,7 +33,8 @@ policy/frameworks/files/extract-all-files"
 if command -v zeek >/dev/null 2>&1; then
   # ── 네이티브 zeek (Colab 등) ──
   echo "[zeek] 네이티브 zeek 사용 ($(zeek --version 2>/dev/null | head -1))"
-  if ( cd "$OUT" && zeek -C -r "$PCAP_ABS" LogAscii::use_json=T $ZEEK_SCRIPTS ); then
+  # native zeek 8.x 는 hash-all-files 로 sha256 이 안 켜짐 → 명시적 해시 스크립트 추가
+  if ( cd "$OUT" && zeek -C -r "$PCAP_ABS" LogAscii::use_json=T $ZEEK_SCRIPTS "$ROOT/scripts/hash-files.zeek" ); then
     OK=1
   else
     OK=0
