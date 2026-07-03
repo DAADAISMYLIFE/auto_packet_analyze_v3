@@ -5,9 +5,13 @@ venv/
 # pcap 캡처 파일 (용량 큼)
 pcaps/
 
-# 분석 산출물
+# 분석 산출물 (LLM 리포트·평가·비교용 — 레포에 올리지 않음)
 output/
 reports/
+result/
+evaluation/
+claude_llm/
+test_result/
 
 # 정답지 (MTA 저작물 — 공개 레포에 올리지 않음)
 answers/
