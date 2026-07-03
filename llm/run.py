@@ -76,6 +76,15 @@ def attach_mac(analysis, tools):
     for v in analysis.get("victims", []):
         v["mac"] = by_ip.get(v.get("ip"))
 
+def attach_hashes(analysis, tools):
+    """iocs.hashes 를 evidence 의 malware-candidate 파일에서 코드가 채운다 (해시 블라인드니스 방지).
+
+    LLM 은 files[] 를 보고도 hashes 를 거의 항상 [] 로 낸다 → 코드가 확정값으로 덮어쓴다.
+    ms-pol(DC 가 SMB 로 배포하는 정상 GPO 파일)은 멀웨어가 아니므로 제외한다.
+    """
+    hs = [f["sha256"] for f in tools.get_files().get("malware_candidates", [])
+          if f.get("sha256") and "ms-pol" not in (f.get("mime") or "")]
+    analysis.setdefault("iocs", {})["hashes"] = sorted(set(hs))
 
 def main():
     # 1. 매개변수로 어떤 evidence파일인지 입력 받기
@@ -100,6 +109,7 @@ def main():
         analysis = forensic(tools)
         if analysis:
             attach_mac(analysis, tools)
+            attach_hashes(analysis, tools)
             out["analysis"] = analysis
             print(json.dumps(analysis, ensure_ascii=False, indent=2))
         else:

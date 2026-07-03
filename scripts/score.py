@@ -43,31 +43,37 @@ def norm_set(xs):
 
 # ─────────────────────────── evidence (grounding) ───────────────────────────
 def evidence_iocs(case, output_dir):
-    """output/<case>/evidence.json 을 훑어 관측된 IP/도메인/해시 집합."""
+    """output/<case>/evidence.json 의 '관측된 IOC' 집합 (grounding 기준).
+
+    전체 트리 정규식 walk 는 내부호스트·유저명·파일명까지 grounded 로 오인하므로
+    build_evidence 가 만든 구조화 필드만 읽는다:
+      external.ips[].ip + domains[].answers  →  관측된 IP
+      external.domains[].query + sni[].sni    →  관측된 도메인/SNI
+      files[].sha256 / .md5                    →  관측된 파일 해시
+    """
     path = os.path.join(output_dir, case, "evidence.json")
     if not os.path.exists(path):
         return None
     with open(path, encoding="utf-8") as f:
         ev = json.load(f)
+    ext = ev.get("external", {}) or {}
     ips, doms, hashes = set(), set(), set()
-
-    def walk(o):
-        if isinstance(o, dict):
-            for v in o.values():
-                walk(v)
-        elif isinstance(o, list):
-            for v in o:
-                walk(v)
-        elif isinstance(o, str):
-            s = o.strip()
-            if IP_RE.fullmatch(s):
-                ips.add(s.lower())
-            elif HASH_RE.fullmatch(s):
-                hashes.add(s.lower())
-            else:
-                for m in DOMAIN_RE.findall(s):
-                    doms.add(m.lower())
-    walk(ev)
+    for x in ext.get("ips", []) or []:
+        if x.get("ip"):
+            ips.add(str(x["ip"]).lower())
+    for d in ext.get("domains", []) or []:
+        if d.get("query"):
+            doms.add(str(d["query"]).lower())
+        for a in (d.get("answers") or []):
+            if a:
+                ips.add(str(a).lower())
+    for s in ext.get("sni", []) or []:
+        if s.get("sni"):
+            doms.add(str(s["sni"]).lower())
+    for frec in ev.get("files", []) or []:
+        for k in ("sha256", "md5"):
+            if frec.get(k):
+                hashes.add(str(frec[k]).lower())
     return {"ips": ips, "domains": doms, "hashes": hashes}
 
 
@@ -131,7 +137,7 @@ def score(atoms, truth, ev):
         r["ground_bad_ips"] = sorted(ip for ip in atoms["ioc_ips"] if ip not in ev["ips"])
         r["ground_bad_hash"] = sorted(h for h in atoms["hashes"] if h not in ev["hashes"])
         r["ground_bad_dom"] = _ungrounded_domains(atoms["domains"], ev["domains"])
-        r["ground_ok"] = not (r["ground_bad_ips"] or r["ground_bad_hash"])
+        r["ground_ok"] = not (r["ground_bad_ips"] or r["ground_bad_hash"] or r["ground_bad_dom"])
     else:
         r["ground_ok"], r["ground_bad_ips"], r["ground_bad_hash"], r["ground_bad_dom"] = None, [], [], []
 
@@ -186,10 +192,11 @@ def print_rows(rows, label):
               f"domR={m('domR'):.2f}  hashR={m('hashR'):.2f}  "
               f"infra_fail={sum(agg.get('infra_fail', []))}  ground_fail={sum(agg.get('ground_fail', []))}")
     for case, r in rows:
-        if r and (r["ground_bad_ips"] or r["ground_bad_hash"] or r["infra_bad"]):
+        if r and (r["ground_bad_ips"] or r["ground_bad_hash"] or r["ground_bad_dom"] or r["infra_bad"]):
             det = []
             if r["ground_bad_ips"]:  det.append(f"환각IP={r['ground_bad_ips']}")
             if r["ground_bad_hash"]: det.append(f"환각HASH={len(r['ground_bad_hash'])}")
+            if r["ground_bad_dom"]:  det.append(f"환각도메인={r['ground_bad_dom']}")
             if r["infra_bad"]:       det.append(f"infra피해자오인={r['infra_bad']}")
             print(f"  ! {case}: {'  '.join(det)}")
 

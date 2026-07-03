@@ -15,7 +15,7 @@
     "c2": ["37.0.10.22", "45.153.241.142", "23.111.114.52"],
     "delivery": ["172.67.139.101", "190.14.37.244"],
     "exfil": [],
-    "domains": ["kamuchehddhgfgf.ddns.net", "sobolpand.top", "solarwindsonline.com"],
+    "domains": ["kamuchehddhgfgf.ddns.net", "sobolpand.top"],
     "hashes": [
       "95928b331e9942e4709b41ec8b59eb6f9e068f53ef2eeb15009feafd4ff5138d",
       "11f3d84aad7131fe124155c9edfceb594649e87de1ee03383f470442d6ed69a1"
