@@ -27,13 +27,15 @@ class Tools:
     def get_hosts_info(self):
         """Collect all hosts.
 
-        Returns every host found in the capture with its IP, MAC, hostname, and username.
+        Returns every host found in the capture with its IP, MAC, hostname, username,
+        and activity window (first_ts/last_ts, epoch seconds) — the window is the
+        patient-zero ordering signal.
         """
-        
+
         # 1. hosts 필드 파싱
         hosts = self.evidence.get("hosts", [])
 
-        # 2. ip, mac, hostname, username 정보 가져오기
+        # 2. ip, mac, hostname, username + 활동 시간창
         result = [
             {
                 "ip": h.get("ip"),
@@ -43,12 +45,22 @@ class Tools:
                 "role": h.get("role"),
                 "scope": h.get("scope"),
                 "ad_domain": h.get("ad_domain"),
+                "first_ts": h.get("first_ts"),
+                "last_ts": h.get("last_ts"),
             }
             for h in hosts
         ]
 
         # 3. return
         return result
+
+    def get_meta(self):
+        """Capture metadata: pcap name, capture window (epoch), duration_s, flow counts.
+
+        triage 프롬프트가 '짧은 캡처면 비콘/DNS 휴리스틱 불신'을 지시하므로
+        duration 이 모델에 반드시 도달해야 한다.
+        """
+        return self.evidence.get("meta", {})
 
     def get_host_info(self, ip: str):
         """Get one host's full detail.

@@ -33,7 +33,6 @@ _load_dotenv(_ENV)
 # ── 모델 / 튜너블 ──
 MODEL = os.environ.get("MODEL", "gemma4:26b")
 NUM_CTX = int(os.environ.get("NUM_CTX", "24576"))
-MAX_TURNS = int(os.environ.get("MAX_TURNS", "12"))
 TEMPERATURE = float(os.environ.get("TEMPERATURE", "0.3"))
 SEED = int(os.environ.get("SEED", "42"))
 
@@ -44,6 +43,18 @@ OPTS = {"temperature": TEMPERATURE, "seed": SEED, "num_ctx": NUM_CTX}
 SYSTEM_PROMPT_TRIAGE = (_PROMPTS / "triage.md").read_text(encoding="utf-8")
 SYSTEM_PROMPT_FORENSIC = (_PROMPTS / "forensic.md").read_text(encoding="utf-8")
 
+# ── triage 출력 스키마 (ollama format 강제) ──
+VERDICT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "verdict": {"enum": ["no_incident", "suspicious", "confirmed"]},
+        "grounds": {"type": "array", "items": {"type": "string"},
+                    "maxItems": 6,
+                    "description": "specific evidence values that drove the verdict"},
+    },
+    "required": ["verdict", "grounds"],
+}
+
 # ── forensic 출력 스키마 (ollama format 강제 → 산문 대신 구조화 JSON) ──
 #   채점(JSON↔truth 비교)과 렌더링(JSON→보고서)의 공통 입력이 된다.
 REPORT_SCHEMA = {
@@ -51,12 +62,14 @@ REPORT_SCHEMA = {
     "properties": {
         "executive_summary": {"type": "string"},
         # 내부 호스트 전수 (인프라 포함) — 코드가 아니라 LLM 이 채우되 status 로 구분
+        #   mac 은 LLM 이 hosts[] 에서 그대로 복사; run.py attach_mac 이 evidence 조인으로 재검증(전사 오염 교정)
         "victims": {
             "type": "array",
             "items": {
                 "type": "object",
                 "properties": {
                     "ip": {"type": "string"},
+                    "mac": {"type": ["string", "null"]},
                     "hostname": {"type": "string"},
                     "username": {"type": "string"},
                     "role": {"type": "string"},
@@ -82,7 +95,8 @@ REPORT_SCHEMA = {
             "items": {
                 "type": "object",
                 "properties": {
-                    "ts": {"type": "string"},
+                    # epoch 초 — evidence 의 first_ts 숫자를 그대로 복사 (변환/재타이핑 금지)
+                    "ts": {"type": "number"},
                     "host": {"type": "string"},
                     "event": {"type": "string"},
                 },
@@ -93,5 +107,8 @@ REPORT_SCHEMA = {
         "anomaly_analysis": {"type": "array", "items": {"type": "string"}},
         "assessment": {"type": "string"},
     },
-    "required": ["executive_summary", "victims", "iocs", "timeline", "assessment"],
+    # patient_zero/anomaly_analysis 를 선택으로 두면 format 강제 모델이 곧잘 생략함
+    # (patient-zero 미스가 이 파이프라인의 고질 오류라 필수로 강제)
+    "required": ["executive_summary", "victims", "iocs", "timeline",
+                 "patient_zero", "anomaly_analysis", "assessment"],
 }

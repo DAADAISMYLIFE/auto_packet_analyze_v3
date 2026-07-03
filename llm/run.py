@@ -2,22 +2,12 @@ import sys, json, re, os
 
 from tools import Tools
 from ollama import chat
-from config import (MODEL, OPTS, REPORT_SCHEMA,
+from config import (MODEL, OPTS, VERDICT_SCHEMA, REPORT_SCHEMA,
                     SYSTEM_PROMPT_TRIAGE, SYSTEM_PROMPT_FORENSIC)
-
-VERDICT_SCHEMA = {
-    "type" : "object",
-    "properties": {
-        "verdict": {"enum": ["no_incident", "suspicious", "confirmed"]},
-        "grounds": {"type": "array", "items": {"type": "string"},
-                    "maxItems": 6,
-                    "description": "specific evidence values that drove the verdict"},
-    },
-    "required" : ["verdict","grounds"]
-}
 
 def triage(tools):
     tier1_evidence = json.dumps({
+        "meta": tools.get_meta(),
         "hosts": tools.get_hosts_info(),
         "alerts" : tools.get_alerts(),
         "external" : tools.get_external(),
@@ -52,6 +42,7 @@ def triage(tools):
 def forensic(tools):
     # tier1 정보 주입 (claude_llm 검증: tier1 만으로 충분 → tool 루프 없이 단일 호출)
     tier1_evidence = json.dumps({
+        "meta": tools.get_meta(),
         "hosts": tools.get_hosts_info(),
         "alerts" : tools.get_alerts(),
         "external" : tools.get_external(),
@@ -74,8 +65,22 @@ def forensic(tools):
               repr((res.message.content or "")[:300]))
         return None
 
+def attach_mac(analysis, tools):
+    """victims[].mac 을 evidence 의 ip 조인 값으로 교정/부착.
+
+    mac 은 LLM 도 출력하지만(스키마에 있음), 베끼다 손상되는 사고
+    (CFA3467 류 hostname 오염과 같은 클래스)가 있어 코드가 정답으로 덮어쓴다.
+    ip 가 evidence 에 없으면 None (환각 mac 도 이때 제거됨).
+    """
+    by_ip = {h.get("ip"): h.get("mac") for h in tools.evidence.get("hosts", [])}
+    for v in analysis.get("victims", []):
+        v["mac"] = by_ip.get(v.get("ip"))
+
+
 def main():
     # 1. 매개변수로 어떤 evidence파일인지 입력 받기
+    if len(sys.argv) < 2:
+        raise SystemExit("사용법: python3 run.py <output/ 아래 evidence 폴더명>")
     filename = sys.argv[1]
 
     # 2. TOOLS 클래스 생성
@@ -94,6 +99,7 @@ def main():
     else:
         analysis = forensic(tools)
         if analysis:
+            attach_mac(analysis, tools)
             out["analysis"] = analysis
             print(json.dumps(analysis, ensure_ascii=False, indent=2))
         else:
