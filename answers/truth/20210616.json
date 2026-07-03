@@ -1,0 +1,22 @@
+{
+  "case": "20210616",
+  "source": "MTA/ISC 2021-06-16 answer + evaluation/20210616.md (grounded to evidence.json)",
+  "verdict": "confirmed",
+  "victims": [
+    {"ip": "10.6.15.119", "hostname": "DESKTOP-NIEE9LP", "username": "tommy.vega",
+     "malware": ["Cobalt Strike", "Hancitor", "Ficker Stealer"]},
+    {"ip": "10.6.15.187", "hostname": "DESKTOP-YS6FZ2G", "username": "horace.maddox",
+     "malware": ["Qakbot"]},
+    {"ip": "10.6.15.93", "hostname": "DEKSTOP-A1CTJVY", "username": "raquel.anderson",
+     "malware": ["AgentTesla"]}
+  ],
+  "infra_ips": ["10.6.15.5", "10.6.15.1"],
+  "iocs": {
+    "c2": ["65.60.35.141", "194.226.60.15", "207.246.77.75"],
+    "delivery": ["8.209.119.208"],
+    "exfil": ["185.66.15.228", "67.20.116.164"],
+    "domains": ["hadevatjulps.com", "srand04rf.ru", "pospvisis.com", "staroxalate.com"],
+    "hashes": ["dee4bb7d46bbbec6c01dc41349cb8826b27be9a0dcf39816ca8bd6e0a39c2019"]
+  },
+  "patient_zero": "10.6.15.119"
+}

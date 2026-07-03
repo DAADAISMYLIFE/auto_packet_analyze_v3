@@ -1,0 +1,9 @@
+{
+  "case": "whatthef",
+  "source": "user's own clean home capture — no threat alerts, no malware-candidate files. EXPECTED verdict no_incident.",
+  "verdict": "no_incident",
+  "victims": [],
+  "infra_ips": [],
+  "iocs": {"c2": [], "delivery": [], "exfil": [], "domains": [], "hashes": []},
+  "patient_zero": null
+}

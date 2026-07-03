@@ -1,0 +1,9 @@
+{
+  "case": "test-http",
+  "source": "small synthetic HTTP test capture — no threat signatures. EXPECTED verdict no_incident.",
+  "verdict": "no_incident",
+  "victims": [],
+  "infra_ips": [],
+  "iocs": {"c2": [], "delivery": [], "exfil": [], "domains": [], "hashes": []},
+  "patient_zero": null
+}

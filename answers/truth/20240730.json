@@ -1,0 +1,18 @@
+{
+  "case": "20240730",
+  "source": "MTA 2024-07-30 answer (STRRAT). Grounded to evidence.json: C2 is 141.98.10.79 (answer PDF body typo says .69; pcap/Figure-1 say .79). STRRAT jar arrived via email → not in pcap → no malware hash expected.",
+  "verdict": "confirmed",
+  "victims": [
+    {"ip": "172.16.1.66", "hostname": "DESKTOP-SKBR25F", "username": "ccollier",
+     "malware": ["STRRAT"]}
+  ],
+  "infra_ips": ["172.16.1.4", "172.16.1.1"],
+  "iocs": {
+    "c2": ["141.98.10.79"],
+    "delivery": [],
+    "exfil": [],
+    "domains": ["github.com", "objects.githubusercontent.com", "repo1.maven.org", "ip-api.com"],
+    "hashes": []
+  },
+  "patient_zero": "172.16.1.66"
+}

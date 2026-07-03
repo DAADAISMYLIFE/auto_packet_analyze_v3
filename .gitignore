@@ -14,7 +14,9 @@ claude_llm/
 test_result/
 
 # 정답지 (MTA 저작물 — 공개 레포에 올리지 않음)
-answers/
+answers/*
+!answers/truth             # truth(IOC 원자)만 채점용으로 올림 — 답안 원문(.txt)은 계속 무시
+!answers/truth/**
 
 # Ollama 서버 로그 (setup.sh가 생성)
 ollama.log

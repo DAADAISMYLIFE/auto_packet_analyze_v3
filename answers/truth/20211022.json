@@ -1,0 +1,25 @@
+{
+  "case": "20211022",
+  "source": "MTA/ISC 2021-10-22 answer + evaluation/20211022.md (grounded to evidence.json)",
+  "verdict": "confirmed",
+  "victims": [
+    {"ip": "10.10.22.157", "hostname": "DESKTOP-NZ875R4", "username": "marcus.cobb",
+     "malware": ["NanoCore"]},
+    {"ip": "10.10.22.158", "hostname": "DESKTOP-87WCE26", "username": "kevin.henderson",
+     "malware": ["BazarLoader"]},
+    {"ip": "10.10.22.156", "hostname": "DESKTOP-CFA3367", "username": "agnes.warren",
+     "malware": ["Qakbot"]}
+  ],
+  "infra_ips": ["10.10.22.22"],
+  "iocs": {
+    "c2": ["37.0.10.22", "45.153.241.142", "23.111.114.52"],
+    "delivery": ["172.67.139.101", "190.14.37.244"],
+    "exfil": [],
+    "domains": ["kamuchehddhgfgf.ddns.net", "sobolpand.top", "solarwindsonline.com"],
+    "hashes": [
+      "95928b331e9942e4709b41ec8b59eb6f9e068f53ef2eeb15009feafd4ff5138d",
+      "11f3d84aad7131fe124155c9edfceb594649e87de1ee03383f470442d6ed69a1"
+    ]
+  },
+  "patient_zero": "10.10.22.157"
+}

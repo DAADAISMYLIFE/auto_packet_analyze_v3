@@ -1,0 +1,21 @@
+{
+  "case": "20250613",
+  "source": "MTA 2025-06-13 answer + evaluation/20250613.md. Payload family Pupy is OSINT (KongTuke/LandUpdate808 chain); only the exploit-kit signature is pcap-visible. No file hash in pcap (payload over TLS).",
+  "verdict": "confirmed",
+  "victims": [
+    {"ip": "10.6.13.133", "hostname": "DESKTOP-5AVE44C", "username": "rgaines",
+     "malware": ["LandUpdate808", "Pupy"]}
+  ],
+  "infra_ips": ["10.6.13.3"],
+  "iocs": {
+    "c2": ["104.21.16.1", "104.21.24.186", "104.21.112.1", "104.16.230.132"],
+    "delivery": ["67.217.228.199"],
+    "exfil": [],
+    "domains": ["hillcoweb.com", "windows-msgas.com", "eventdata-microsoft.live",
+                "event-time-microsoft.org", "event-datamicrosoft.live",
+                "trycloudflare.com", "truglomedspa.com", "dng-microsoftds.com"],
+    "hashes": []
+  },
+  "patient_zero": "10.6.13.133",
+  "precursors": ["truglomedspa.com", "dng-microsoftds.com"]
+}
