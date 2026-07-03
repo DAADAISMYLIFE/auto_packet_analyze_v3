@@ -26,6 +26,7 @@ import os
 import statistics
 import sys
 from collections import Counter, defaultdict
+from datetime import datetime, timezone
 
 # ── 캡 (초과 시 _truncation 기록). 현재 pcap 규모선 거의 안 밟힘 ──
 CAP_EXTERNAL_DOMAINS = 500
@@ -64,6 +65,40 @@ def read_ndjson(path):
             except json.JSONDecodeError:
                 continue
     return out
+
+
+# ── 타임스탬프 통일: 내부 계산은 epoch 그대로, 최종 출력만 UTC ISO ──
+#   zeek는 epoch float, suricata는 로컬오프셋 문자열(+0900)이라 형식이 섞임
+#   → LLM이 타임라인 만들 때 혼동하므로 evidence.json 에서는 한 형식으로 통일.
+_TS_KEYS = {"ts", "first_ts", "last_ts", "capture_start", "capture_end"}
+
+
+def to_utc_iso(v):
+    """epoch(float/int) 또는 오프셋 ISO 문자열 → 'YYYY-MM-DDTHH:MM:SS.mmmZ' (UTC)."""
+    if v is None:
+        return None
+    try:
+        if isinstance(v, (int, float)):
+            dt = datetime.fromtimestamp(v, tz=timezone.utc)
+        elif isinstance(v, str):
+            s = v.strip().replace("Z", "+0000")
+            fmt = "%Y-%m-%dT%H:%M:%S.%f%z" if "." in s else "%Y-%m-%dT%H:%M:%S%z"
+            dt = datetime.strptime(s, fmt)
+        else:
+            return v
+        return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    except (ValueError, OverflowError, OSError):
+        return v                      # 파싱 불가 값은 원본 유지 (조용히 버리지 않음)
+
+
+def normalize_ts(obj):
+    """evidence 트리 전체에서 _TS_KEYS 이름의 값만 UTC ISO 로 변환."""
+    if isinstance(obj, dict):
+        return {k: (to_utc_iso(v) if k in _TS_KEYS else normalize_ts(v))
+                for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [normalize_ts(x) for x in obj]
+    return obj
 
 
 def is_real_host(ip):
@@ -583,7 +618,8 @@ def build_evidence(name, root="/home/qkekdhd/auto_packet_analyze_v3"):
         "anomalies": build_anomalies(conn, hosts, dns_recs),
         "_truncation": trunc,
     }
-    return evidence
+    # 모든 내부 계산(주기/duration/정렬)이 끝난 뒤 마지막에 한 번만 형식 통일
+    return normalize_ts(evidence)
 
 
 # ---------------------------------------------------------------------------
