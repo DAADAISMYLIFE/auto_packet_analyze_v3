@@ -26,7 +26,7 @@ import os
 import statistics
 import sys
 from collections import Counter, defaultdict
-from datetime import datetime, timezone
+from datetime import datetime
 
 # ── 캡 (초과 시 _truncation 기록). 현재 pcap 규모선 거의 안 밟힘 ──
 CAP_EXTERNAL_DOMAINS = 500
@@ -67,38 +67,20 @@ def read_ndjson(path):
     return out
 
 
-# ── 타임스탬프 통일: 내부 계산은 epoch 그대로, 최종 출력만 UTC ISO ──
-#   zeek는 epoch float, suricata는 로컬오프셋 문자열(+0900)이라 형식이 섞임
-#   → LLM이 타임라인 만들 때 혼동하므로 evidence.json 에서는 한 형식으로 통일.
-_TS_KEYS = {"ts", "first_ts", "last_ts", "capture_start", "capture_end"}
-
-
-def to_utc_iso(v):
-    """epoch(float/int) 또는 오프셋 ISO 문자열 → 'YYYY-MM-DDTHH:MM:SS.mmmZ' (UTC)."""
-    if v is None:
+# ── 타임스탬프: evidence.json 은 전부 epoch(초) 로 통일. UTC/ISO 표시 변환 안 함. ──
+#   zeek 는 이미 epoch float. suricata 만 오프셋 문자열('...+0900')이라 epoch 로 바꾼다.
+#   (오프셋을 반영해 '올바른 숫자'를 얻을 뿐 — 표시 시간대 변환이 아니다.)
+def suri_ts_to_epoch(s):
+    """Suricata 오프셋 문자열('...+0900') → epoch float. 숫자면 그대로, 실패시 None."""
+    if isinstance(s, (int, float)):
+        return s
+    if not isinstance(s, str):
         return None
     try:
-        if isinstance(v, (int, float)):
-            dt = datetime.fromtimestamp(v, tz=timezone.utc)
-        elif isinstance(v, str):
-            s = v.strip().replace("Z", "+0000")
-            fmt = "%Y-%m-%dT%H:%M:%S.%f%z" if "." in s else "%Y-%m-%dT%H:%M:%S%z"
-            dt = datetime.strptime(s, fmt)
-        else:
-            return v
-        return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
-    except (ValueError, OverflowError, OSError):
-        return v                      # 파싱 불가 값은 원본 유지 (조용히 버리지 않음)
-
-
-def normalize_ts(obj):
-    """evidence 트리 전체에서 _TS_KEYS 이름의 값만 UTC ISO 로 변환."""
-    if isinstance(obj, dict):
-        return {k: (to_utc_iso(v) if k in _TS_KEYS else normalize_ts(v))
-                for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [normalize_ts(x) for x in obj]
-    return obj
+        fmt = "%Y-%m-%dT%H:%M:%S.%f%z" if "." in s else "%Y-%m-%dT%H:%M:%S%z"
+        return datetime.strptime(s.strip(), fmt).timestamp()
+    except (ValueError, OverflowError):
+        return None
 
 
 def is_real_host(ip):
@@ -395,7 +377,7 @@ def build_evidence(name, root="/home/qkekdhd/auto_packet_analyze_v3"):
         st = sig_stat.setdefault(key, {"count": 0, "first_ts": None,
                                        "src": set(), "dst": set(), "cids": []})
         st["count"] += 1
-        ts = d.get("timestamp")
+        ts = suri_ts_to_epoch(d.get("timestamp"))
         if ts and (st["first_ts"] is None or ts < st["first_ts"]):
             st["first_ts"] = ts
         if d.get("src_ip"):
@@ -618,8 +600,7 @@ def build_evidence(name, root="/home/qkekdhd/auto_packet_analyze_v3"):
         "anomalies": build_anomalies(conn, hosts, dns_recs),
         "_truncation": trunc,
     }
-    # 모든 내부 계산(주기/duration/정렬)이 끝난 뒤 마지막에 한 번만 형식 통일
-    return normalize_ts(evidence)
+    return evidence
 
 
 # ---------------------------------------------------------------------------
