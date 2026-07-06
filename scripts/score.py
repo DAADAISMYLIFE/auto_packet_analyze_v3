@@ -141,6 +141,13 @@ def score(atoms, truth, ev):
     else:
         r["ground_ok"], r["ground_bad_ips"], r["ground_bad_hash"], r["ground_bad_dom"] = None, [], [], []
 
+    # false-positive: 보고서가 '정상인데 악성으로 올린' IOC (truth.benign_*)
+    #   grounding·recall 로는 안 잡힘 — WU 업데이트 해시를 iocs 에 넣는 오탐을 여기서 잡는다
+    benign_h = norm_set(truth.get("benign_hashes", []))
+    benign_i = norm_set(truth.get("benign_ips", []))
+    r["fp"] = (sorted(h for h in atoms["hashes"] if h in benign_h)
+               + sorted(ip for ip in atoms["ioc_ips"] if ip in benign_i))
+
     pz = truth.get("patient_zero")
     r["pz_ok"] = (atoms["patient_zero"] == str(pz).lower()) if pz else None
     return r
@@ -166,7 +173,7 @@ def _f(x):
 
 def print_rows(rows, label):
     print(f"\n=== {label} ===")
-    hdr = f"{'case':<10} {'verdict':<14} {'grd':<4} {'vR':<5} {'infra!':<7} {'hashR':<6} {'iocR':<5} {'domR':<5} {'pz':<3}"
+    hdr = f"{'case':<10} {'verdict':<14} {'grd':<4} {'vR':<5} {'infra!':<7} {'hashR':<6} {'fp':<4} {'iocR':<5} {'domR':<5} {'pz':<3}"
     print(hdr); print("-" * len(hdr))
     agg = {}
     for case, r in rows:
@@ -175,14 +182,16 @@ def print_rows(rows, label):
         vok = "OK" if r["verdict_ok"] else "XX"
         grd = "-" if r["ground_ok"] is None else ("ok" if r["ground_ok"] else "BAD")
         infra = "ok" if not r["infra_bad"] else f"FAIL{len(r['infra_bad'])}"
+        fp = "ok" if not r["fp"] else f"FP{len(r['fp'])}"
         pz = "-" if r["pz_ok"] is None else ("OK" if r["pz_ok"] else "XX")
         print(f"{case:<10} {(str(r['verdict'])+'/'+vok):<14} {grd:<4} {_f(r['victimR']):<5} "
-              f"{infra:<7} {_f(r['hashR']):<6} {_f(r['iocR']):<5} {_f(r['domR']):<5} {pz:<3}")
+              f"{infra:<7} {_f(r['hashR']):<6} {fp:<4} {_f(r['iocR']):<5} {_f(r['domR']):<5} {pz:<3}")
         for k in ("victimR", "iocR", "domR", "hashR"):
             if r[k] is not None:
                 agg.setdefault(k, []).append(r[k])
         agg.setdefault("verdict", []).append(1 if r["verdict_ok"] else 0)
         agg.setdefault("infra_fail", []).append(1 if r["infra_bad"] else 0)
+        agg.setdefault("fp_total", []).append(len(r["fp"]))
         if r["ground_ok"] is not None:
             agg.setdefault("ground_fail", []).append(0 if r["ground_ok"] else 1)
     if agg:
@@ -190,14 +199,16 @@ def print_rows(rows, label):
         print("-" * len(hdr))
         print(f"{'AGG':<10} verdict={m('verdict'):.2f}  victimR={m('victimR'):.2f}  iocR={m('iocR'):.2f}  "
               f"domR={m('domR'):.2f}  hashR={m('hashR'):.2f}  "
-              f"infra_fail={sum(agg.get('infra_fail', []))}  ground_fail={sum(agg.get('ground_fail', []))}")
+              f"infra_fail={sum(agg.get('infra_fail', []))}  ground_fail={sum(agg.get('ground_fail', []))}  "
+              f"fp_total={sum(agg.get('fp_total', []))}")
     for case, r in rows:
-        if r and (r["ground_bad_ips"] or r["ground_bad_hash"] or r["ground_bad_dom"] or r["infra_bad"]):
+        if r and (r["ground_bad_ips"] or r["ground_bad_hash"] or r["ground_bad_dom"] or r["infra_bad"] or r["fp"]):
             det = []
             if r["ground_bad_ips"]:  det.append(f"환각IP={r['ground_bad_ips']}")
             if r["ground_bad_hash"]: det.append(f"환각HASH={len(r['ground_bad_hash'])}")
             if r["ground_bad_dom"]:  det.append(f"환각도메인={r['ground_bad_dom']}")
             if r["infra_bad"]:       det.append(f"infra피해자오인={r['infra_bad']}")
+            if r["fp"]:              det.append(f"오탐(정상을악성으로)={[x[:10] for x in r['fp']]}")
             print(f"  ! {case}: {'  '.join(det)}")
 
 
