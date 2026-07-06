@@ -157,8 +157,13 @@ def annotate_attacks(analysis, tools):
         a["target_scope"] = scope(a.get("target"))
         if a.get("target"):
             targets.add(str(a["target"]).lower())
-        if a.get("target_host"):
-            thosts.add(str(a["target_host"]).lower())
+        # 표적 도메인은 attack 레코드가 이미 안다 → target_host + sample_uri 의 host
+        th = str(a.get("target_host") or "").lower()
+        if th and th != "unknown":
+            thosts.add(th)
+        host = str(a.get("sample_uri") or "").split("/", 1)[0].lower()
+        if host and "." in host and not host.replace(".", "").replace(":", "").isdigit():
+            thosts.add(host)
 
     iocs = analysis.get("iocs", {})
     removed = []
