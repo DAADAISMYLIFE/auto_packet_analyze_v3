@@ -53,17 +53,21 @@ already judged this capture worth analyzing.
   (`UNION SELECT`, `' OR 1=1`), XSS (`<script>`), OS command injection, local/remote
   file inclusion (`php://`, `=http://`), sensitive-path probing (`/.env`, `/.git/`,
   `wp-login`, `phpMyAdmin`), webshell-like requests.
-- Direction: read src -> dst. The host SENDING the attack `uri` is the ATTACKER; the
-  host RECEIVING it is the TARGET. An external target is NOT a C2 server, and an
-  internal host that merely SENDS crafted requests is not necessarily malware-infected
-  (it may be a scanner / pentest tool). Do NOT force web-attack traffic into the
-  malware-C2 model (victim / C2 / beacon).
+- Direction: read src -> dst. The host SENDING the attack is the ATTACKER (actor); the
+  host RECEIVING it is the TARGET (victim). The target is NOT a C2 and is NOT an IOC —
+  never place it in iocs. Do NOT force attack traffic into the malware-C2 model
+  (victim / C2 / beacon).
+- Fail-safe on the actor: an INTERNAL host that ORIGINATES attacks may be an authorized
+  scan OR an already-compromised host used as a pivot / RCE platform. You CANNOT tell
+  intent from packets, so assume the dangerous case — mark that host `compromised` in
+  victims. Never downgrade it to "probably just a pentest".
 - A benign fetch (OS/AV updates, CDN, OCSP, normal app paths) is not an attack — say
   so. The `url` on a `files[]` entry is the download path that delivered it.
-- Record EVERY web attack in the `web_attacks[]` output array (attacker, target,
-  attack_type, target_host, sample_uri). The TARGET (the attacked server) goes ONLY in
-  `web_attacks.target` — NEVER in iocs.c2/delivery/exfil/domains. Those iocs buckets
-  are malware C2 / delivery / exfil endpoints only, never a host that was ATTACKED.
+- Record EVERY attack (web or otherwise) in the `attacks[]` output array (technique,
+  actor, target, target_host, sample_uri, disposition). The TARGET (the attacked host)
+  goes ONLY in `attacks.target` — NEVER in iocs.c2/delivery/exfil/domains. Those iocs
+  buckets are malware C2 / delivery / exfil endpoints only, never a host that was
+  ATTACKED. Leave actor_scope/target_scope out — code fills them from the inventory.
 
 # Task
 Grounded in the evidence, determine:
@@ -105,16 +109,17 @@ Return a SINGLE JSON object. Copy every IP / domain / hash EXACTLY from the evid
   it to the incident or dismissing it with a reason. Never omit an entry silently.
 - assessment: verdict recap + one line on coverage limits (signature + behavior only;
   encrypted payloads not inspected).
-- web_attacks: array — OMIT or [] when there is no web attack. One entry per attack
-  seen in `http`:
-    - attack_type: path_traversal / sqli / xss / command_injection / lfi_rfi /
-      sensitive_probe / other
-    - attacker: ip that SENT the malicious request (copied from evidence)
-    - target: ip that RECEIVED it (the attacked server). This is NOT a C2 — do NOT
-      also place it in iocs.
+- attacks: array — OMIT or [] when there is no attack. One entry per attack (web or
+  otherwise) observed in the evidence:
+    - technique: path_traversal / sqli / xss / command_injection / lfi_rfi /
+      sensitive_probe / port_scan / brute_force / other
+    - actor: ip that PERFORMED the attack (copied from evidence)
+    - target: ip that RECEIVED it (the victim). This is NOT a C2 — do NOT place it in iocs.
     - target_host: hostname/domain of the target, if known
-    - sample_uri: the offending uri, copied EXACTLY from the evidence
+    - sample_uri: the offending request / uri, copied EXACTLY from the evidence
     - disposition: succeeded / attempted / unknown (use the http status if present)
+    (actor_scope / target_scope are filled by code from the host inventory — do not
+     produce them.)
 
 # Language
 Reason in English. (The final human-facing report is rendered later, in Korean.)

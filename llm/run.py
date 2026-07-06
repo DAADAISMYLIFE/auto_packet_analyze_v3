@@ -129,19 +129,37 @@ def ground_iocs(analysis, tools):
     if rejected:
         analysis["_rejected_iocs"] = rejected
 
-def strip_attack_targets(analysis):
-    """web_attacks 의 target(피격 서버)은 IOC 가 아니다 → iocs 에서 최종 제거.
+def annotate_attacks(analysis, tools):
+    """attacks[] 후처리 (코드 소유):
 
-    target 을 c2 로 오분류하면 차단정책이 '피격 서버(때론 우리 인프라)'를 막는 자폭.
-    스키마에 web_attacks.target 칸을 줬어도 gemma 가 습관적으로 c2 에 또 넣을 수 있어
-    코드가 최종적으로 빼낸다 (ground_iocs 와 같은 '코드가 안전을 소유' 원칙).
-    제거분은 _removed_attack_targets 로 노출(투명).
+      1. actor_scope/target_scope 를 host inventory 로 채운다 — 내부/외부는
+         evidence.hosts 유무로 결정론적. 차단 반응 분기의 근거가 된다:
+           actor internal → 침해된 발판일 수 있음(RCE/pivot) → 호스트 격리 대상
+           actor external → 외부 공격자 → 경계에서 IP 차단 대상
+      2. target(피격자)은 IOC 가 아니므로 iocs(c2/delivery/exfil/domains)에서 제거.
+         스키마에 attacks.target 칸을 줬어도 gemma 가 습관적으로 c2 에 또 넣을 수 있어
+         코드가 최종적으로 빼낸다(ground_iocs 와 같은 '코드가 안전을 소유' 원칙).
+         자기/피해 서버를 차단정책이 막는 자폭 방지. 제거분은 _removed_attack_targets 로 노출.
     """
-    waf = analysis.get("web_attacks") or []
-    if not waf:
+    attacks = analysis.get("attacks") or []
+    if not attacks:
         return
-    targets = {str(w.get("target")).lower() for w in waf if w.get("target")}
-    thosts = {str(w.get("target_host")).lower() for w in waf if w.get("target_host")}
+    internal = {str(h.get("ip")).lower() for h in tools.evidence.get("hosts", []) if h.get("ip")}
+
+    def scope(ip):
+        if not ip:
+            return "unknown"
+        return "internal" if str(ip).lower() in internal else "external"
+
+    targets, thosts = set(), set()
+    for a in attacks:
+        a["actor_scope"] = scope(a.get("actor"))       # 코드가 확정 (LLM 값 덮어씀)
+        a["target_scope"] = scope(a.get("target"))
+        if a.get("target"):
+            targets.add(str(a["target"]).lower())
+        if a.get("target_host"):
+            thosts.add(str(a["target_host"]).lower())
+
     iocs = analysis.get("iocs", {})
     removed = []
     for bucket in ("c2", "delivery", "exfil"):
@@ -149,7 +167,7 @@ def strip_attack_targets(analysis):
         for ip in iocs.get(bucket, []):
             if str(ip).lower() in targets:
                 removed.append({"kind": "ip", "bucket": bucket, "value": ip,
-                                "reason": "web-attack 표적 (피격 서버 — IOC 아님)"})
+                                "reason": "attack 표적 (피격자 — IOC 아님)"})
             else:
                 kept.append(ip)
         iocs[bucket] = kept
@@ -157,7 +175,7 @@ def strip_attack_targets(analysis):
     for d in iocs.get("domains", []):
         if str(d).lower() in thosts:
             removed.append({"kind": "domain", "value": d,
-                            "reason": "web-attack 표적 호스트 (피격 서버 — IOC 아님)"})
+                            "reason": "attack 표적 호스트 (피격자 — IOC 아님)"})
         else:
             kept_doms.append(d)
     iocs["domains"] = kept_doms
@@ -200,7 +218,7 @@ def main():
             attach_mac(analysis, tools)
             attach_hashes(analysis, tools)
             ground_iocs(analysis, tools)       # iocs 오염/환각 제거 (차단정책 안전장치)
-            strip_attack_targets(analysis)     # web-attack 표적을 iocs 에서 제거 (자기 서버 차단 방지)
+            annotate_attacks(analysis, tools)  # attacks scope 채움 + 표적을 iocs 에서 제거
             out["analysis"] = analysis
             print(json.dumps(analysis, ensure_ascii=False, indent=2))
         else:

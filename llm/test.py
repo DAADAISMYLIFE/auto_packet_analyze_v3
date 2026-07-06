@@ -18,7 +18,7 @@ def test_tool_call():
         "content": "테스트용 툴 돌려줘. arg1엔 나한테 하고 싶은 말을 한 단어로 넣어줘.",
     }]
     # 함수 객체를 그대로 넘김 → ollama 가 타입힌트+docstring 으로 스키마 자동 생성
-    response: ChatResponse = chat(model=MODEL, messages=messages, tools=TOOLS)
+    response: ChatResponse = chat(model=MODEL, messages=messages, think=False, tools=TOOLS)
 
     print("tool_calls:", response.message.tool_calls)
 

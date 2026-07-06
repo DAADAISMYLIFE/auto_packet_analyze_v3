@@ -106,22 +106,27 @@ REPORT_SCHEMA = {
         "patient_zero": {"type": "string"},
         "anomaly_analysis": {"type": "array", "items": {"type": "string"}},
         "assessment": {"type": "string"},
-        # 웹 공격(traversal/sqli/...) 전용 칸 — target(피격 서버)을 iocs.c2 로
-        #   오분류하는 걸 막는다. optional(멀웨어 전용 케이스는 생략/[]).
-        #   run.py strip_attack_targets 가 target 을 iocs 에서 최종 제거(자기 서버 차단 방지).
-        "web_attacks": {
+        # 위협 종류에 무관한 공격 기록 — 멀웨어 iocs 모델이 못 담는 사건
+        #   (웹공격/스캔/브루트포스/피벗 등)을 actor/target/technique 로 표현한다.
+        #   target(피격자)은 IOC 가 아니므로 iocs 에 넣지 않는다(자기/피해 서버 차단 방지).
+        #   actor_scope/target_scope 는 run.py annotate_attacks 가 host inventory 로
+        #   채운다(내부/외부는 결정론적) → 차단 반응 분기(내부 actor=호스트격리 /
+        #   외부 actor=IP차단)의 근거. optional(순수 멀웨어 케이스는 생략/[]).
+        "attacks": {
             "type": "array",
             "items": {
                 "type": "object",
                 "properties": {
-                    "attack_type": {"type": "string"},
-                    "attacker": {"type": "string"},
+                    "technique": {"type": "string"},
+                    "actor": {"type": "string"},
                     "target": {"type": "string"},
                     "target_host": {"type": "string"},
                     "sample_uri": {"type": "string"},
                     "disposition": {"enum": ["succeeded", "attempted", "unknown"]},
+                    "actor_scope": {"enum": ["internal", "external", "unknown"]},
+                    "target_scope": {"enum": ["internal", "external", "unknown"]},
                 },
-                "required": ["attack_type", "attacker", "target"],
+                "required": ["technique", "actor", "target"],
             },
         },
     },
