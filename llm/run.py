@@ -11,6 +11,7 @@ def triage(tools):
         "hosts": tools.get_hosts_info(),
         "alerts" : tools.get_alerts(),
         "external" : tools.get_external(),
+        "http" : tools.get_http(),
         "files" : tools.get_files(),
         "lateral_movement" : tools.get_lateral_movement(),
         "anomalies" : tools.get_anomalies()
@@ -46,6 +47,7 @@ def forensic(tools):
         "hosts": tools.get_hosts_info(),
         "alerts" : tools.get_alerts(),
         "external" : tools.get_external(),
+        "http" : tools.get_http(),
         "files" : tools.get_files(),
         "lateral_movement" : tools.get_lateral_movement(),
         "anomalies" : tools.get_anomalies()
@@ -127,6 +129,17 @@ def ground_iocs(analysis, tools):
     if rejected:
         analysis["_rejected_iocs"] = rejected
 
+def create_rules(tools):
+     
+     analyzing_report = "보고서 json 파일 읽기"
+     
+     res = chat(model=MODEL, format="SNORT패턴 만들기",   # ← format이 강제 선택
+            think=True,                              # thinking 끔: content가 바로 JSON, 추론토큰이 예산 안 먹음
+            messages=[{"role": "system", "content": SYSTEM_PROMPT_TRIAGE},
+                        {"role": "user", "content": "뭐시기 저시기\n\n# Analayze\n" + tier1_evidence}],
+            options=OPTS
+            )
+
 def main():
     # 1. 매개변수로 어떤 evidence파일인지 입력 받기
     if len(sys.argv) < 2:
@@ -165,6 +178,12 @@ def main():
     with open(path, "w", encoding="utf-8") as f:
         json.dump(out, f, ensure_ascii=False, indent=2)
     print(f"[report] 저장됨 → {path}")
+
+    # 5. TODO(다음 단계): reports/<name>.json → Snort 차단 룰 생성.
+    #    LLM chat() 이 아니라 별도 코드 모듈로 — iocs 재전사 오염 방지(합의됨).
+    #    아래 create_rules 스텁은 미사용(format/think 오류 + tier1_evidence 미정의).
+
+    # 6. TODO : 보고서 만들기
 
 if __name__ == "__main__":
     main()

@@ -12,7 +12,8 @@ evidence 빌더 (파이프라인 3단계: 정규화 및 압축)
   - 포함/제외는 로그 필드 boolean 으로만 결정 (하드 시그널 유무).
   - alerts 는 severity 우선(1=최고위험), 전 시그니처 유지 (양으로 안 자름).
   - files 는 source=SSL(OCSP/인증서 부산물) 제외.
-  - external(ip/도메인/sni)에 first_ts 부착 → 타임라인/patient-zero 재료.
+  - external(ip/도메인/sni/http URL)에 first_ts 부착 → 타임라인/patient-zero 재료.
+    http URL 은 method+host+uri 로 dedup, files 에는 uid 조인으로 전달 URL 부착.
   - 측면이동은 정황 요약만, 상세는 Tier2 드릴다운.
   - 캡 초과분은 조용히 버리지 않고 _truncation 에 기록.
   - Suricata 디코더 진단("SURICATA ..." / Generic Protocol Command Decode)은
@@ -33,6 +34,8 @@ CAP_EXTERNAL_DOMAINS = 500
 CAP_EXTERNAL_IPS = 500
 CAP_EXTERNAL_SNI = 300
 CAP_ALERT_SAMPLE_CIDS = 3    # alert 시그니처별 드릴다운용 community_id 표본 수
+CAP_EXTERNAL_HTTP = 300      # 요청 URL dedup 후 최대 개수
+CAP_URL_LEN = 400            # 초장문 URI(쿼리스트링 유출 등) 방어용 길이 캡
 
 # ── anomalies 보고 하한/캡 (판단 기준 아님 — 표본 부족·크기 제한용, _floors 로 노출) ──
 ANOM_BEACON_MIN_CONNS = 5    # 이 미만이면 주기(지터) 계산 표본 부족
@@ -387,6 +390,35 @@ def build_evidence(name, root="/home/qkekdhd/auto_packet_analyze_v3"):
         if cid and len(st["cids"]) < CAP_ALERT_SAMPLE_CIDS and cid not in st["cids"]:
             st["cids"].append(cid)
 
+    # ── http.log: 웹 요청 URL (dedup: method+host+uri) ──
+    #   URI 는 path traversal/웹셸/쿼리스트링 유출이 그대로 드러나는 유일한 필드.
+    #   집계만 하고 판단 없음. uid→url 맵은 files 의 전달 URL 부착에 재사용.
+    url_of_uid = {}
+    ext_http = {}            # (method, host, uri) -> entry
+    for d in read_ndjson(f"{Z}/http.log"):
+        host, uri = d.get("host"), d.get("uri")
+        if not (host or uri):
+            continue
+        url = f"{host or d.get('id.resp_h') or ''}{uri or ''}"[:CAP_URL_LEN]
+        if d.get("uid") and d["uid"] not in url_of_uid:
+            url_of_uid[d["uid"]] = url
+        e = ext_http.setdefault((d.get("method"), host, uri), {
+            "url": url, "method": d.get("method"),
+            "dst_ip": d.get("id.resp_h"), "status": None,
+            "user_agent": d.get("user_agent"),
+            "src_ips": set(), "count": 0, "first_ts": None,
+        })
+        e["count"] += 1
+        if e["status"] is None and d.get("status_code") is not None:
+            e["status"] = d["status_code"]
+        if d.get("id.orig_h"):
+            e["src_ips"].add(d["id.orig_h"])
+        ts = d.get("ts")
+        if ts and (e["first_ts"] is None or ts < e["first_ts"]):
+            e["first_ts"] = ts
+    for e in ext_http.values():
+        e["src_ips"] = sorted(e["src_ips"])
+
     # ── files.log: source=SSL(OCSP/cert) 제외 + sha256 로 dedup ──
     #   같은 파일이 여러 flow/청크로 여러 번 찍힘 → 해시로 묶어 1개(count+first_ts).
     files_raw = read_ndjson(f"{Z}/files.log")
@@ -404,10 +436,12 @@ def build_evidence(name, root="/home/qkekdhd/auto_packet_analyze_v3"):
         rec = files_by_key.setdefault(key, {
             "sha256": f.get("sha256"), "md5": f.get("md5"),
             "mime": f.get("mime_type"), "bytes": f.get("seen_bytes"),
-            "first_ts": None, "count": 0,
+            "url": None, "first_ts": None, "count": 0,
             "sources": set(), "community_ids": [],
         })
         rec["count"] += 1
+        if rec["url"] is None:
+            rec["url"] = url_of_uid.get(f.get("uid"))
         if f.get("source"):
             rec["sources"].add(f["source"])
         if ts and (rec["first_ts"] is None or ts < rec["first_ts"]):
@@ -561,6 +595,7 @@ def build_evidence(name, root="/home/qkekdhd/auto_packet_analyze_v3"):
         "ips": capped(ext_ip, CAP_EXTERNAL_IPS, "external_ips_dropped"),
         "domains": capped(ext_dom, CAP_EXTERNAL_DOMAINS, "external_domains_dropped"),
         "sni": capped(ext_sni, CAP_EXTERNAL_SNI, "external_sni_dropped"),
+        "http": capped(ext_http, CAP_EXTERNAL_HTTP, "external_http_dropped"),
     }
 
     # ── alerts: severity 우선(1 먼저), 동률이면 count 많은 순 ──
@@ -620,7 +655,8 @@ def main():
     print(f"  hosts={len(ev['hosts'])} alerts={len(ev['alerts'])} "
           f"diag={sum(d['count'] for d in ev['capture_diagnostics'])} "
           f"files={len(ev['files'])} ext_ip={len(ev['external']['ips'])} "
-          f"ext_dom={len(ev['external']['domains'])} sni={len(ev['external']['sni'])}")
+          f"ext_dom={len(ev['external']['domains'])} sni={len(ev['external']['sni'])} "
+          f"http={len(ev['external']['http'])}")
     print(f"  anomalies: beacons={len(an['beacons'])} exfil={len(an['exfil_candidates'])} "
           f"no_dns={len(an['no_dns_direct'])} odd_ports={len(an['odd_ports'])} "
           f"role_dev={len(an['role_deviation'])} fanout={len(an['internal_fanout'])}")

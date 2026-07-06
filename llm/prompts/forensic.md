@@ -45,6 +45,22 @@ already judged this capture worth analyzing.
 - A JA3 "possible/abuse.ch" match is a POSSIBILITY, not a confirmed family. Report
   it as "possible X (JA3 match)", never as a definite attribution.
 
+# Web request inspection (`http`)
+- The `http` array lists web requests (method, url, uri, status, user_agent,
+  src_ips, dst_ip). Inspect EACH request for attack patterns — REGARDLESS of whether
+  an alert fired. A signature may simply not exist for the attack.
+- Look for: path traversal (`../`, `/etc/passwd`, `%2e%2e`), SQL injection
+  (`UNION SELECT`, `' OR 1=1`), XSS (`<script>`), OS command injection, local/remote
+  file inclusion (`php://`, `=http://`), sensitive-path probing (`/.env`, `/.git/`,
+  `wp-login`, `phpMyAdmin`), webshell-like requests.
+- Direction: read src -> dst. The host SENDING the attack `uri` is the ATTACKER; the
+  host RECEIVING it is the TARGET. An external target is NOT a C2 server, and an
+  internal host that merely SENDS crafted requests is not necessarily malware-infected
+  (it may be a scanner / pentest tool). Do NOT force web-attack traffic into the
+  malware-C2 model (victim / C2 / beacon).
+- A benign fetch (OS/AV updates, CDN, OCSP, normal app paths) is not an attack — say
+  so. The `url` on a `files[]` entry is the download path that delivered it.
+
 # Task
 Grounded in the evidence, determine:
 1. Victims / internal hosts: ip, mac, hostname, username, role.

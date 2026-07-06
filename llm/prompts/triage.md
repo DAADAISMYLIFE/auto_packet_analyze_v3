@@ -16,6 +16,11 @@ NOT write a report. A separate stage performs deep analysis ONLY if you escalate
                   - well-known cloud/CDN/NTP endpoints are usually background.
 4. lateral_movement — routine AD traffic toward infrastructure (DC/DNS/DHCP)
                   is normal, not an attack.
+5. http         — web requests. Inspect each `uri` for attack patterns EVEN IF no
+                  alert fired (signatures miss novel/custom attacks): path traversal
+                  (../, /etc/passwd), SQLi (UNION SELECT, ' OR 1=1), XSS (<script>),
+                  command injection, LFI/RFI (php://), sensitive-path probing
+                  (/.env, /.git/, wp-login), webshell-like requests.
 
 # Verdict rules
 - no_incident: no threat alerts, no malware-candidate files, and every anomaly has
@@ -26,6 +31,8 @@ NOT write a report. A separate stage performs deep analysis ONLY if you escalate
   large-volume upload to a first-seen endpoint, high-entropy DNS at scale).
 - confirmed: threat-signature alerts and/or malware-candidate files, corroborated
   by behavior.
+- A web request whose `uri` shows an attack pattern (traversal, SQLi, XSS, injection,
+  webshell) — even with NO alert — is at least `suspicious`. Escalate; do not dismiss.
 
 Quote evidence values in grounds exactly as written — never re-type from memory.
 
