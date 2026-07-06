@@ -16,11 +16,7 @@
     "delivery": ["8.209.119.208"],
     "exfil": ["185.66.15.228", "67.20.116.164"],
     "domains": ["hadevatjulps.com", "srand04rf.ru", "pospvisis.com", "staroxalate.com"],
-    "hashes": ["dee4bb7d46bbbec6c01dc41349cb8826b27be9a0dcf39816ca8bd6e0a39c2019",
-               "594f33722c63d1fe66607c20566f0d1c64aea5b8f88fe58a0ceb4cb8889fbe63"]
+    "hashes": ["dee4bb7d46bbbec6c01dc41349cb8826b27be9a0dcf39816ca8bd6e0a39c2019"]
   },
-  "benign_hashes": ["71ee718054698651622dfb815d8e94381090e413db15a3e3f8556b82b0d358e7",
-                    "99d9b8c1dd29c0ee27dd5f322b1ef8667b86774e2454a47eeb5bdf55fb686570"],
-  "benign_hashes_note": "au.download.windowsupdate.com 이 서빙한 MS Defender 업데이트(am_delta_patch). iocs.hashes 에 들어가면 안 됨 — 차단정책이 MS 업데이트를 막는 오탐.",
   "patient_zero": "10.6.15.119"
 }
