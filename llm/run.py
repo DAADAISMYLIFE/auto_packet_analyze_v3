@@ -129,6 +129,41 @@ def ground_iocs(analysis, tools):
     if rejected:
         analysis["_rejected_iocs"] = rejected
 
+def strip_attack_targets(analysis):
+    """web_attacks 의 target(피격 서버)은 IOC 가 아니다 → iocs 에서 최종 제거.
+
+    target 을 c2 로 오분류하면 차단정책이 '피격 서버(때론 우리 인프라)'를 막는 자폭.
+    스키마에 web_attacks.target 칸을 줬어도 gemma 가 습관적으로 c2 에 또 넣을 수 있어
+    코드가 최종적으로 빼낸다 (ground_iocs 와 같은 '코드가 안전을 소유' 원칙).
+    제거분은 _removed_attack_targets 로 노출(투명).
+    """
+    waf = analysis.get("web_attacks") or []
+    if not waf:
+        return
+    targets = {str(w.get("target")).lower() for w in waf if w.get("target")}
+    thosts = {str(w.get("target_host")).lower() for w in waf if w.get("target_host")}
+    iocs = analysis.get("iocs", {})
+    removed = []
+    for bucket in ("c2", "delivery", "exfil"):
+        kept = []
+        for ip in iocs.get(bucket, []):
+            if str(ip).lower() in targets:
+                removed.append({"kind": "ip", "bucket": bucket, "value": ip,
+                                "reason": "web-attack 표적 (피격 서버 — IOC 아님)"})
+            else:
+                kept.append(ip)
+        iocs[bucket] = kept
+    kept_doms = []
+    for d in iocs.get("domains", []):
+        if str(d).lower() in thosts:
+            removed.append({"kind": "domain", "value": d,
+                            "reason": "web-attack 표적 호스트 (피격 서버 — IOC 아님)"})
+        else:
+            kept_doms.append(d)
+    iocs["domains"] = kept_doms
+    if removed:
+        analysis["_removed_attack_targets"] = removed
+
 def create_rules(tools):
      
      analyzing_report = "보고서 json 파일 읽기"
@@ -165,6 +200,7 @@ def main():
             attach_mac(analysis, tools)
             attach_hashes(analysis, tools)
             ground_iocs(analysis, tools)       # iocs 오염/환각 제거 (차단정책 안전장치)
+            strip_attack_targets(analysis)     # web-attack 표적을 iocs 에서 제거 (자기 서버 차단 방지)
             out["analysis"] = analysis
             print(json.dumps(analysis, ensure_ascii=False, indent=2))
         else:

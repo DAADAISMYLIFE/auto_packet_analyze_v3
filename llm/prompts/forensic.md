@@ -60,6 +60,10 @@ already judged this capture worth analyzing.
   malware-C2 model (victim / C2 / beacon).
 - A benign fetch (OS/AV updates, CDN, OCSP, normal app paths) is not an attack — say
   so. The `url` on a `files[]` entry is the download path that delivered it.
+- Record EVERY web attack in the `web_attacks[]` output array (attacker, target,
+  attack_type, target_host, sample_uri). The TARGET (the attacked server) goes ONLY in
+  `web_attacks.target` — NEVER in iocs.c2/delivery/exfil/domains. Those iocs buckets
+  are malware C2 / delivery / exfil endpoints only, never a host that was ATTACKED.
 
 # Task
 Grounded in the evidence, determine:
@@ -101,6 +105,16 @@ Return a SINGLE JSON object. Copy every IP / domain / hash EXACTLY from the evid
   it to the incident or dismissing it with a reason. Never omit an entry silently.
 - assessment: verdict recap + one line on coverage limits (signature + behavior only;
   encrypted payloads not inspected).
+- web_attacks: array — OMIT or [] when there is no web attack. One entry per attack
+  seen in `http`:
+    - attack_type: path_traversal / sqli / xss / command_injection / lfi_rfi /
+      sensitive_probe / other
+    - attacker: ip that SENT the malicious request (copied from evidence)
+    - target: ip that RECEIVED it (the attacked server). This is NOT a C2 — do NOT
+      also place it in iocs.
+    - target_host: hostname/domain of the target, if known
+    - sample_uri: the offending uri, copied EXACTLY from the evidence
+    - disposition: succeeded / attempted / unknown (use the http status if present)
 
 # Language
 Reason in English. (The final human-facing report is rendered later, in Korean.)

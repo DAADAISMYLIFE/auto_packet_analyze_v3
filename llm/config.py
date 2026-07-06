@@ -106,6 +106,24 @@ REPORT_SCHEMA = {
         "patient_zero": {"type": "string"},
         "anomaly_analysis": {"type": "array", "items": {"type": "string"}},
         "assessment": {"type": "string"},
+        # 웹 공격(traversal/sqli/...) 전용 칸 — target(피격 서버)을 iocs.c2 로
+        #   오분류하는 걸 막는다. optional(멀웨어 전용 케이스는 생략/[]).
+        #   run.py strip_attack_targets 가 target 을 iocs 에서 최종 제거(자기 서버 차단 방지).
+        "web_attacks": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "attack_type": {"type": "string"},
+                    "attacker": {"type": "string"},
+                    "target": {"type": "string"},
+                    "target_host": {"type": "string"},
+                    "sample_uri": {"type": "string"},
+                    "disposition": {"enum": ["succeeded", "attempted", "unknown"]},
+                },
+                "required": ["attack_type", "attacker", "target"],
+            },
+        },
     },
     # patient_zero/anomaly_analysis 를 선택으로 두면 format 강제 모델이 곧잘 생략함
     # (patient-zero 미스가 이 파이프라인의 고질 오류라 필수로 강제)
