@@ -80,11 +80,14 @@ def attach_hashes(analysis, tools):
     """iocs.hashes 를 evidence 의 malware-candidate 파일에서 코드가 채운다 (해시 블라인드니스 방지).
 
     LLM 은 files[] 를 보고도 hashes 를 거의 항상 [] 로 낸다 → 코드가 확정값으로 덮어쓴다.
-    ms-pol(DC 가 SMB 로 배포하는 정상 GPO 파일)은 멀웨어가 아니므로 제외한다.
+    ms-pol(정상 GPO) + 업데이트 인프라(windowsupdate 등)가 서빙한 x-dosexec 은 serving-host
+    조인으로 제외한다 (MS Defender 업데이트 해시를 차단정책에 넣던 오탐 차단).
+    제외분은 침묵하지 않고 _excluded_benign_hashes 로 노출(투명).
     """
-    hs = [f["sha256"] for f in tools.get_files().get("malware_candidates", [])
-          if f.get("sha256") and "ms-pol" not in (f.get("mime") or "")]
-    analysis.setdefault("iocs", {})["hashes"] = sorted(set(hs))
+    res = tools.malware_candidate_hashes()
+    analysis.setdefault("iocs", {})["hashes"] = res["malware"]
+    if res["benign_excluded"]:
+        analysis["_excluded_benign_hashes"] = res["benign_excluded"]
 
 def main():
     # 1. 매개변수로 어떤 evidence파일인지 입력 받기

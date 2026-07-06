@@ -202,3 +202,61 @@ class Tools:
         """
 
         return self.evidence.get("anomalies", {})
+
+    # ===================== 해시 provenance (원본 로그 조인, 코드 전용) =====================
+    #  attach_hashes 오탐 방지 전용 최소 리더 — LLM 에 노출하는 tier2 는 만들지 않는다.
+    #  업데이트/텔레메트리 인프라가 서빙한 실행파일은 멀웨어가 아님(MS Defender 업데이트 등).
+    BENIGN_SERVING = ("windowsupdate.com", "download.microsoft.com", "delivery.mp.microsoft.com",
+                      "update.microsoft.com", "msftconnecttest.com", "digicert.com")
+
+    def _zeek(self, name):
+        """zeek NDJSON 로그를 1회 로드 후 캐시. 파일 없으면 []."""
+        if not hasattr(self, "_zc"):
+            self._zc = {}
+        if name not in self._zc:
+            path = os.path.join(self.base, "zeek", name)
+            rows = []
+            if os.path.exists(path):
+                with open(path, encoding="utf-8") as f:
+                    for line in f:
+                        try:
+                            rows.append(json.loads(line))
+                        except json.JSONDecodeError:
+                            pass
+            self._zc[name] = rows
+        return self._zc[name]
+
+    def _http_by_uid(self):
+        """uid → 그 flow 의 첫 http 요청 (files→http serving-host 조인용)."""
+        if not hasattr(self, "_huid"):
+            idx = {}
+            for h in self._zeek("http.log"):
+                idx.setdefault(h.get("uid"), h)
+            self._huid = idx
+        return self._huid
+
+    def serving_host_for_hash(self, sha256):
+        """files.log 에서 sha256 매칭 → 그 flow 의 uid 로 http.log 조인 → 서빙 host/uri.
+        community_id 가 아니라 files.log 원본의 uid 를 쓴다(조인 정확)."""
+        for f in self._zeek("files.log"):
+            if f.get("sha256") == sha256:
+                h = self._http_by_uid().get(f.get("uid"), {}) if f.get("source") == "HTTP" else {}
+                return {"serving_ip": f.get("id.resp_h"), "serving_host": h.get("host"),
+                        "uri": h.get("uri")}
+        return {"serving_ip": None, "serving_host": None, "uri": None}
+
+    def malware_candidate_hashes(self):
+        """malware-candidate 해시를 서빙 호스트로 악성/정상(업데이트 인프라) 분리.
+        코드가 소유 → LLM 해시 블라인드 + 윈도우업데이트 오탐 둘 다 차단.
+        반환: {"malware":[sha...], "benign_excluded":[{sha256,serving_host}...]}"""
+        mal, benign = [], []
+        for f in self.get_files().get("malware_candidates", []):
+            sha, mime = f.get("sha256"), (f.get("mime") or "")
+            if not sha or "ms-pol" in mime:      # ms-pol = DC 배포 GPO, 멀웨어 아님
+                continue
+            host = (self.serving_host_for_hash(sha).get("serving_host") or "").lower()
+            if host and any(b in host for b in self.BENIGN_SERVING):
+                benign.append({"sha256": sha, "serving_host": host})
+            else:
+                mal.append(sha)
+        return {"malware": sorted(set(mal)), "benign_excluded": benign}
