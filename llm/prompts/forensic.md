@@ -60,23 +60,6 @@ Address every `anomalies` entry: either connect it to the incident or dismiss it
 with a stated reason. Report every item. If unknown, mark it "unknown" — never
 omit silently, never fabricate.
 
-# Tier 2 — raw-log drill-down (provided to you; you did NOT and cannot call it)
-A second block "# Tier-2 Raw-log drill-down" is appended after the Tier-1 evidence.
-Code selected the targets from Tier-1 and read the raw Zeek logs for you — you do
-not choose or call anything. Use it to sharpen judgment (it holds the actual URIs,
-User-Agents, DNS TTLs, SMTP subjects, per-flow byte/beacon stats, and each malware
-file's serving host).
-- Every value in Tier 2 was read from the logs by code, so it is safe to cite.
-- `files` maps each candidate hash to its serving host. A hash served by an OS
-  update / telemetry host (e.g. windowsupdate.com) is a benign download, NOT malware.
-- `http` groups requests by (host, uri, user_agent); a host that switches from a
-  normal browser UA to legacy IE UAs is a strong post-infection signal.
-- `smb` shows only WRITE actions between internal hosts; an empty list means the
-  host probed but wrote nothing → "probing attempt, no evidence of execution."
-- Category KEY PRESENT = that drill was run (an empty per-entity value = checked,
-  nothing found → you may confidently dismiss it). Category KEY ABSENT = the
-  trigger never applied → treat as "not applicable," not as evidence of absence.
-
 # Output (structured JSON — a schema enforces this shape)
 Return a SINGLE JSON object. Copy every IP / domain / hash EXACTLY from the evidence
 — never re-type from memory; a value not in the evidence must not appear. Fields:
