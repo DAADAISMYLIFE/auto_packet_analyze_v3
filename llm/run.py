@@ -89,6 +89,44 @@ def attach_hashes(analysis, tools):
     if res["benign_excluded"]:
         analysis["_excluded_benign_hashes"] = res["benign_excluded"]
 
+def ground_iocs(analysis, tools):
+    """iocs 의 IP/도메인을 evidence 관측집합과 exact-match 대조해 오염/환각을 제거한다.
+    (차단정책 안전장치 — 오염된 IP 로 깨진 Snort 룰이 나가는 것을 원천 차단.)
+
+    - 복원은 안 함: '1para.36.191.35' 를 '194.36.191.35' 로 추측하지 않는다(추측이
+      틀리면 정상 서버 차단 위험). evidence 에 없으면 그냥 제거.
+    - 도메인은 suffix 허용: 'mail.staroxalate.com' 은 'staroxalate.com' 관측으로 인정.
+    - 제거분은 조용히 버리지 않고 _rejected_iocs 로 노출(사람 검토용).
+    - hashes 는 이미 attach_hashes 가 evidence 에서 코드로 채우므로 건드리지 않는다.
+    """
+    obs = tools.observed_iocs()
+
+    def dom_ok(d):
+        d = d.lower()
+        return any(d == o or d.endswith("." + o) or o.endswith("." + d) for o in obs["domains"])
+
+    iocs = analysis.get("iocs", {})
+    rejected = []
+    for bucket in ("c2", "delivery", "exfil"):
+        kept = []
+        for ip in iocs.get(bucket, []):
+            if str(ip).lower() in obs["ips"]:
+                kept.append(ip)
+            else:
+                rejected.append({"kind": "ip", "bucket": bucket, "value": ip,
+                                 "reason": "evidence 미관측 (오염/환각)"})
+        iocs[bucket] = kept
+    kept_doms = []
+    for d in iocs.get("domains", []):
+        if dom_ok(str(d)):
+            kept_doms.append(d)
+        else:
+            rejected.append({"kind": "domain", "value": d,
+                             "reason": "evidence 미관측 (오염/환각)"})
+    iocs["domains"] = kept_doms
+    if rejected:
+        analysis["_rejected_iocs"] = rejected
+
 def main():
     # 1. 매개변수로 어떤 evidence파일인지 입력 받기
     if len(sys.argv) < 2:
@@ -113,6 +151,7 @@ def main():
         if analysis:
             attach_mac(analysis, tools)
             attach_hashes(analysis, tools)
+            ground_iocs(analysis, tools)       # iocs 오염/환각 제거 (차단정책 안전장치)
             out["analysis"] = analysis
             print(json.dumps(analysis, ensure_ascii=False, indent=2))
         else:

@@ -260,3 +260,33 @@ class Tools:
             else:
                 mal.append(sha)
         return {"malware": sorted(set(mal)), "benign_excluded": benign}
+
+    def observed_iocs(self):
+        """grounding 기준집합: evidence 에서 '실제 관측된' IP/도메인/해시.
+
+        전체 트리 regex walk 가 아니라 구조화 필드만 읽는다 — 내부호스트·유저명이
+        기준집합에 섞이면 오염이 통과하므로(초기 score.py 버그) 반드시 구조화 필드로.
+          external.ips[].ip + domains[].answers  →  관측 IP
+          external.domains[].query + sni[].sni    →  관측 도메인
+          files[].sha256 / .md5                    →  관측 해시
+        """
+        e = self.evidence
+        ext = e.get("external", {}) or {}
+        ips, doms, hashes = set(), set(), set()
+        for x in ext.get("ips", []) or []:
+            if x.get("ip"):
+                ips.add(str(x["ip"]).lower())
+        for d in ext.get("domains", []) or []:
+            if d.get("query"):
+                doms.add(str(d["query"]).lower())
+            for a in (d.get("answers") or []):
+                if a:
+                    ips.add(str(a).lower())
+        for s in ext.get("sni", []) or []:
+            if s.get("sni"):
+                doms.add(str(s["sni"]).lower())
+        for f in e.get("files", []) or []:
+            for k in ("sha256", "md5"):
+                if f.get(k):
+                    hashes.add(str(f[k]).lower())
+        return {"ips": ips, "domains": doms, "hashes": hashes}
