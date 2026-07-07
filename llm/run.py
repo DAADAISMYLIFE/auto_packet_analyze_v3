@@ -5,6 +5,10 @@ from ollama import chat
 from config import (MODEL, OPTS, VERDICT_SCHEMA, REPORT_SCHEMA,
                     SYSTEM_PROMPT_TRIAGE, SYSTEM_PROMPT_FORENSIC)
 
+# IOC 값에서 진짜 IP/도메인 토큰만 뽑는 정규식 (LLM 장식·JSON 누출 제거용)
+_IPV4 = re.compile(r"(?:\d{1,3}\.){3}\d{1,3}")
+_DOMAIN = re.compile(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?")
+
 def triage(tools):
     tier1_evidence = json.dumps({
         "meta": tools.get_meta(),
@@ -112,8 +116,15 @@ def ground_iocs(analysis, tools):
     obs = tools.observed_iocs()
 
     def host_of(v):
-        # 'host/path' 또는 'host:port' 로 와도 host 만 — IP 버킷에 URL 이 들어오는 사고 방어
-        return str(v).split("/", 1)[0].strip().lower()
+        # LLM 이 IP/도메인에 붙이는 오염을 벗겨 진짜 토큰만 추출:
+        #   'host/path'(경로), '1.2.3.4 (HTTP Beacon)'(주석), "dom.com']},"(JSON 누출) 등.
+        # obs 대조는 그대로라 환각·손상 오타는 여전히 탈락(안전) — 값을 '추측 복원'하지는 않음.
+        s = str(v).split("/", 1)[0].strip().lower()
+        m = _IPV4.search(s)
+        if m:
+            return m.group(0)
+        m = _DOMAIN.search(s)
+        return m.group(0) if m else s
 
     def dom_ok(d):
         d = d.lower()
