@@ -72,21 +72,31 @@ def forensic(tools):
         return None
 
 def attach_identity(analysis, tools):
-    """victims[] 의 mac/hostname/username 을 evidence 의 ip 조인 값으로 교정/부착.
+    """victims[] 의 ip 조인 정체(mac/hostname/username)와 patient_zero 를 코드가 확정.
 
-    셋 다 LLM 이 hosts[] 에서 베끼는 값이라 두 가지 사고가 난다:
+    mac/hostname/username 은 LLM 이 hosts[] 에서 베끼는 값이라 두 사고가 난다:
       (1) 전사 손상 — 'CFA3467' 류 hostname 오염, mac 오염.
-      (2) 통째 생략 — 스키마에서 optional 이라 format 강제 gemma 가 곧잘 빼먹음
-          (20210616 에서 hostname/username 누락).
-    ip 만 앵커로 쓰고 정체(mac/hostname/username)는 코드가 evidence 로 덮어쓴다.
-    ip 가 evidence 에 없으면 None (환각 host 도 이때 제거됨).
+      (2) 통째 생략 — 스키마 optional 이라 format 강제 gemma 가 곧잘 빼먹음.
+    또 LLM 은 ip/patient_zero 에 설명을 덧붙이기도 한다
+    ('10.6.15.119 (First observed...)') → clean_ip 로 IP 토큰만 뽑아 정규화.
+    ip 만 앵커로 쓰고 정체는 코드가 evidence 로 덮어쓴다(없으면 None, 환각 제거).
     """
     by_ip = {h.get("ip"): h for h in tools.evidence.get("hosts", [])}
+    host_ips = set(by_ip)
+
+    def clean_ip(v):
+        # 장식 붙은 값에서 IP 토큰만 — 내부 호스트 IP 를 우선 선택
+        ips = _IPV4.findall(str(v or ""))
+        return next((i for i in ips if i in host_ips), ips[0] if ips else v)
+
     for v in analysis.get("victims", []):
-        h = by_ip.get(v.get("ip")) or {}
+        v["ip"] = clean_ip(v.get("ip"))
+        h = by_ip.get(v["ip"]) or {}
         v["mac"] = h.get("mac")
         v["hostname"] = h.get("hostname")
         v["username"] = h.get("username")
+    if analysis.get("patient_zero"):
+        analysis["patient_zero"] = clean_ip(analysis["patient_zero"])
 
 def attach_hashes(analysis, tools):
     """iocs.hashes 를 evidence 의 malware-candidate 파일에서 코드가 채운다 (해시 블라인드니스 방지).
