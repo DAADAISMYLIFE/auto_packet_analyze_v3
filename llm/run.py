@@ -98,10 +98,16 @@ def ground_iocs(analysis, tools):
     - 복원은 안 함: '1para.36.191.35' 를 '194.36.191.35' 로 추측하지 않는다(추측이
       틀리면 정상 서버 차단 위험). evidence 에 없으면 그냥 제거.
     - 도메인은 suffix 허용: 'mail.staroxalate.com' 은 'staroxalate.com' 관측으로 인정.
+    - IP 버킷(c2/delivery/exfil)에 URL(host/path)이나 도메인이 잘못 담기면 host 만
+      떼어 관측 도메인일 때 domains 로 이관(salvage) — gemma 의 버킷 오배치 구제.
     - 제거분은 조용히 버리지 않고 _rejected_iocs 로 노출(사람 검토용).
     - hashes 는 이미 attach_hashes 가 evidence 에서 코드로 채우므로 건드리지 않는다.
     """
     obs = tools.observed_iocs()
+
+    def host_of(v):
+        # 'host/path' 또는 'host:port' 로 와도 host 만 — IP 버킷에 URL 이 들어오는 사고 방어
+        return str(v).split("/", 1)[0].strip().lower()
 
     def dom_ok(d):
         d = d.lower()
@@ -109,19 +115,27 @@ def ground_iocs(analysis, tools):
 
     iocs = analysis.get("iocs", {})
     rejected = []
+    salvaged_doms = []          # IP 버킷에 잘못 담긴 도메인 → domains 로 이관
     for bucket in ("c2", "delivery", "exfil"):
         kept = []
         for ip in iocs.get(bucket, []):
-            if str(ip).lower() in obs["ips"]:
-                kept.append(ip)
+            host = host_of(ip)
+            if host in obs["ips"]:
+                kept.append(host)
+            elif dom_ok(host):
+                salvaged_doms.append(host)
             else:
                 rejected.append({"kind": "ip", "bucket": bucket, "value": ip,
                                  "reason": "evidence 미관측 (오염/환각)"})
         iocs[bucket] = kept
-    kept_doms = []
-    for d in iocs.get("domains", []):
-        if dom_ok(str(d)):
-            kept_doms.append(d)
+    kept_doms, seen = [], set()
+    for d in list(iocs.get("domains", [])) + salvaged_doms:
+        host = host_of(d)
+        if not host or host in seen:
+            continue
+        if dom_ok(host):
+            seen.add(host)
+            kept_doms.append(host)
         else:
             rejected.append({"kind": "domain", "value": d,
                              "reason": "evidence 미관측 (오염/환각)"})
@@ -161,9 +175,13 @@ def annotate_attacks(analysis, tools):
         th = str(a.get("target_host") or "").lower()
         if th and th != "unknown":
             thosts.add(th)
+        # sample_uri 의 host 정체는 방향에 달렸다:
+        #   actor 내부(밖을 공격) → host = 외부 피격자 → 표적이므로 제거
+        #   actor 외부(안을 공격) → host = 페이로드 배포 서버 → delivery IOC 이므로 보존
         host = str(a.get("sample_uri") or "").split("/", 1)[0].lower()
         if host and "." in host and not host.replace(".", "").replace(":", "").isdigit():
-            thosts.add(host)
+            if a["actor_scope"] == "internal":
+                thosts.add(host)
 
     iocs = analysis.get("iocs", {})
     removed = []
