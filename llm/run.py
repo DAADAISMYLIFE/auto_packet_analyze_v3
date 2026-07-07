@@ -85,9 +85,19 @@ def attach_identity(analysis, tools):
     host_ips = set(by_ip)
 
     def clean_ip(v):
-        # 장식 붙은 값에서 IP 토큰만 — 내부 호스트 IP 를 우선 선택
-        ips = _IPV4.findall(str(v or ""))
-        return next((i for i in ips if i in host_ips), ips[0] if ips else v)
+        # 장식/손상 방어 — 값에서 IP 를 뽑되 evidence 호스트로만 복구(추측 금지):
+        #   1) 정상 IPv4 토큰이 호스트면 그것 ('10.6.15.119 (First observed...)' → 10.6.15.119)
+        #   2) 없으면 숫자군 4개를 재조립해 호스트면 채택 ('10.6_15.187' → 10.6.15.187, 구분자 손상)
+        # 호스트 대조로만 복구 → 환각·자릿수 손상은 원문 유지(정상 호스트 오인 방지).
+        s = str(v or "")
+        ips = _IPV4.findall(s)
+        for i in ips:
+            if i in host_ips:
+                return i
+        groups = re.findall(r"\d{1,3}", s)
+        if len(groups) == 4 and ".".join(groups) in host_ips:
+            return ".".join(groups)
+        return ips[0] if ips else v
 
     for v in analysis.get("victims", []):
         v["ip"] = clean_ip(v.get("ip"))
