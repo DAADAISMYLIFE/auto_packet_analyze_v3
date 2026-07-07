@@ -62,7 +62,8 @@ REPORT_SCHEMA = {
     "properties": {
         "executive_summary": {"type": "string"},
         # 내부 호스트 전수 (인프라 포함) — 코드가 아니라 LLM 이 채우되 status 로 구분
-        #   mac 은 LLM 이 hosts[] 에서 그대로 복사; run.py attach_mac 이 evidence 조인으로 재검증(전사 오염 교정)
+        #   mac/hostname/username 은 run.py attach_identity 가 evidence 의 ip 조인으로 덮어씀
+        #   (LLM 전사 오염·optional 생략 방지 — status/malware 만 LLM 판단으로 남김)
         "victims": {
             "type": "array",
             "items": {

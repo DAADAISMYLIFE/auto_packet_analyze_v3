@@ -67,16 +67,22 @@ def forensic(tools):
               repr((res.message.content or "")[:300]))
         return None
 
-def attach_mac(analysis, tools):
-    """victims[].mac 을 evidence 의 ip 조인 값으로 교정/부착.
+def attach_identity(analysis, tools):
+    """victims[] 의 mac/hostname/username 을 evidence 의 ip 조인 값으로 교정/부착.
 
-    mac 은 LLM 도 출력하지만(스키마에 있음), 베끼다 손상되는 사고
-    (CFA3467 류 hostname 오염과 같은 클래스)가 있어 코드가 정답으로 덮어쓴다.
-    ip 가 evidence 에 없으면 None (환각 mac 도 이때 제거됨).
+    셋 다 LLM 이 hosts[] 에서 베끼는 값이라 두 가지 사고가 난다:
+      (1) 전사 손상 — 'CFA3467' 류 hostname 오염, mac 오염.
+      (2) 통째 생략 — 스키마에서 optional 이라 format 강제 gemma 가 곧잘 빼먹음
+          (20210616 에서 hostname/username 누락).
+    ip 만 앵커로 쓰고 정체(mac/hostname/username)는 코드가 evidence 로 덮어쓴다.
+    ip 가 evidence 에 없으면 None (환각 host 도 이때 제거됨).
     """
-    by_ip = {h.get("ip"): h.get("mac") for h in tools.evidence.get("hosts", [])}
+    by_ip = {h.get("ip"): h for h in tools.evidence.get("hosts", [])}
     for v in analysis.get("victims", []):
-        v["mac"] = by_ip.get(v.get("ip"))
+        h = by_ip.get(v.get("ip")) or {}
+        v["mac"] = h.get("mac")
+        v["hostname"] = h.get("hostname")
+        v["username"] = h.get("username")
 
 def attach_hashes(analysis, tools):
     """iocs.hashes 를 evidence 의 malware-candidate 파일에서 코드가 채운다 (해시 블라인드니스 방지).
@@ -238,7 +244,7 @@ def main():
     else:
         analysis = forensic(tools)
         if analysis:
-            attach_mac(analysis, tools)
+            attach_identity(analysis, tools)
             attach_hashes(analysis, tools)
             ground_iocs(analysis, tools)       # iocs 오염/환각 제거 (차단정책 안전장치)
             annotate_attacks(analysis, tools)  # attacks scope 채움 + 표적을 iocs 에서 제거
