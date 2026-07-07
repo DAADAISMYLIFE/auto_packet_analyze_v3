@@ -2,7 +2,7 @@
 Defines the tools the local LLM (sLLM) can call.
 """
 
-import os, json
+import ipaddress, os, json
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -272,29 +272,55 @@ class Tools:
         return {"malware": sorted(set(mal)), "benign_excluded": benign}
 
     def observed_iocs(self):
-        """grounding 기준집합: evidence 에서 '실제 관측된' IP/도메인/해시.
+        """grounding 기준집합: evidence 에서 '실제 관측된 외부' IP/도메인/해시.
 
         전체 트리 regex walk 가 아니라 구조화 필드만 읽는다 — 내부호스트·유저명이
         기준집합에 섞이면 오염이 통과하므로(초기 score.py 버그) 반드시 구조화 필드로.
           external.ips[].ip + domains[].answers  →  관측 IP
           external.domains[].query + sni[].sni    →  관측 도메인
           files[].sha256 / .md5                    →  관측 해시
+
+        내부 자산은 기준집합에서 원천 제외 (차단정책 자폭 방지 — DC 를 c2 로 내도 통과 못 함):
+          - answers 의 사설/내부 IP        (AD DNS 가 DC IP 를 답하는 경로)
+          - AD 존 소속 이름                (kerberos ad_domain + '_msdcs.<존>' SRV 로 식별)
+          - 내부로만 풀리는 이름            (답이 전부 사설/내부 = 내부 존)
+          - answers 의 CNAME 문자열        (IP 집합에 도메인이 섞이는 오염)
         """
         e = self.evidence
         ext = e.get("external", {}) or {}
+        internal = {str(h.get("ip")) for h in e.get("hosts", []) if h.get("ip")}
+
+        ad_zones = {str(h["ad_domain"]).lower()
+                    for h in e.get("hosts", []) if h.get("ad_domain")}
+        for d in ext.get("domains", []) or []:
+            q = str(d.get("query") or "").lower()
+            if "._msdcs." in q:
+                ad_zones.add(q.split("._msdcs.", 1)[1])
+
+        def priv(a):
+            try:
+                return ipaddress.ip_address(str(a)).is_private
+            except ValueError:
+                return None                      # IP 아님 (CNAME 문자열 등)
+
+        def in_ad_zone(n):
+            return any(n == z or n.endswith("." + z) for z in ad_zones)
+
         ips, doms, hashes = set(), set(), set()
         for x in ext.get("ips", []) or []:
             if x.get("ip"):
                 ips.add(str(x["ip"]).lower())
         for d in ext.get("domains", []) or []:
-            if d.get("query"):
-                doms.add(str(d["query"]).lower())
-            for a in (d.get("answers") or []):
-                if a:
-                    ips.add(str(a).lower())
+            q, ans = str(d.get("query") or "").lower(), (d.get("answers") or [])
+            ext_ans = [str(a).lower() for a in ans
+                       if priv(a) is False and str(a) not in internal]
+            if q and not in_ad_zone(q) and (ext_ans or not ans):
+                doms.add(q)
+            ips.update(ext_ans)
         for s in ext.get("sni", []) or []:
-            if s.get("sni"):
-                doms.add(str(s["sni"]).lower())
+            sni = str(s.get("sni") or "").lower()
+            if sni and not in_ad_zone(sni):
+                doms.add(sni)
         for f in e.get("files", []) or []:
             for k in ("sha256", "md5"):
                 if f.get(k):

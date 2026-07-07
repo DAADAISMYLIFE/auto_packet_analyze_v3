@@ -9,6 +9,11 @@ from config import (MODEL, OPTS, VERDICT_SCHEMA, REPORT_SCHEMA,
 _IPV4 = re.compile(r"(?:\d{1,3}\.){3}\d{1,3}")
 _DOMAIN = re.compile(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?")
 
+# dom_ok 역-suffix('관측 서브도메인의 부모 인정')가 TLD 까지 올라가는 것 차단
+# ('com' 차단 룰 방지 — 단일라벨은 무조건 기각, 흔한 공용접미사도 기각)
+PUBLIC_SUFFIX_FLOOR = {"co.kr", "or.kr", "go.kr", "ne.kr", "pe.kr",
+                       "co.uk", "com.br", "com.au", "co.jp", "com.cn"}
+
 def triage(tools):
     tier1_evidence = json.dumps({
         "meta": tools.get_meta(),
@@ -130,16 +135,28 @@ def ground_iocs(analysis, tools):
     - 도메인은 suffix 허용: 'mail.staroxalate.com' 은 'staroxalate.com' 관측으로 인정.
     - IP 버킷(c2/delivery/exfil)에 URL(host/path)이나 도메인이 잘못 담기면 host 만
       떼어 관측 도메인일 때 domains 로 이관(salvage) — gemma 의 버킷 오배치 구제.
+    - 내부 자산(호스트 IP, AD 존/하위 이름)은 관측 여부와 무관하게 기각 — 자기 DC/
+      워크스테이션을 차단정책이 막는 자폭 방지. 사유는 '내부 자산'으로 구분(환각과 다름).
+    - 단일라벨(TLD)·공용접미사 도메인은 기각 — 'com' 차단 룰 방지 (PUBLIC_SUFFIX_FLOOR).
     - 제거분은 조용히 버리지 않고 _rejected_iocs 로 노출(사람 검토용).
     - hashes 는 이미 attach_hashes 가 evidence 에서 코드로 채우므로 건드리지 않는다.
     """
     obs = tools.observed_iocs()
+    hosts = tools.evidence.get("hosts", [])
+    internal_ips = {str(h.get("ip")).lower() for h in hosts if h.get("ip")}
+    # AD 존 식별 (결정론적, 이중 신호): kerberos realm + '_msdcs.<존>' SRV 질의
+    # (kerberos 트래픽이 없는 캡처에서도 _msdcs 로 존이 잡힘)
+    ad_domains = {str(h.get("ad_domain")).lower() for h in hosts if h.get("ad_domain")}
+    for _d in tools.evidence.get("external", {}).get("domains", []) or []:
+        _q = str(_d.get("query") or "").lower()
+        if "._msdcs." in _q:
+            ad_domains.add(_q.split("._msdcs.", 1)[1])
 
     def host_of(v):
         # LLM 이 IP/도메인에 붙이는 오염을 벗겨 진짜 토큰만 추출:
-        #   'host/path'(경로), '1.2.3.4 (HTTP Beacon)'(주석), "dom.com']},"(JSON 누출) 등.
+        #   'http://host/path'(스킴·경로), '1.2.3.4 (HTTP Beacon)'(주석), "dom.com']},"(JSON 누출) 등.
         # obs 대조는 그대로라 환각·손상 오타는 여전히 탈락(안전) — 값을 '추측 복원'하지는 않음.
-        s = str(v).split("/", 1)[0].strip().lower()
+        s = re.sub(r"^[a-z]+://", "", str(v).strip().lower()).split("/", 1)[0]
         m = _IPV4.search(s)
         if m:
             return m.group(0)
@@ -148,7 +165,14 @@ def ground_iocs(analysis, tools):
 
     def dom_ok(d):
         d = d.lower()
+        if "." not in d or d in PUBLIC_SUFFIX_FLOOR:   # TLD/공용접미사 차단
+            return False
         return any(d == o or d.endswith("." + o) or o.endswith("." + d) for o in obs["domains"])
+
+    def is_internal_asset(host):
+        # 내부 호스트 IP, 또는 AD 존/하위 이름(desktop-x.saltmobsters.com) = 우리 자산 → IOC 아님
+        return host in internal_ips \
+            or any(host == a or host.endswith("." + a) for a in ad_domains)
 
     iocs = analysis.get("iocs", {})
     rejected = []
@@ -157,7 +181,10 @@ def ground_iocs(analysis, tools):
         kept = []
         for ip in iocs.get(bucket, []):
             host = host_of(ip)
-            if host in obs["ips"]:
+            if is_internal_asset(host):          # 내부 자산 IP → 차단정책 자폭 방지
+                rejected.append({"kind": "ip", "bucket": bucket, "value": ip,
+                                 "reason": "내부 자산 (IOC 아님)"})
+            elif host in obs["ips"]:
                 kept.append(host)
             elif dom_ok(host):
                 salvaged_doms.append(host)
@@ -168,9 +195,17 @@ def ground_iocs(analysis, tools):
     kept_doms, seen = [], set()
     for d in list(iocs.get("domains", [])) + salvaged_doms:
         host = host_of(d)
-        if not host or host in seen:
+        if host in seen:
             continue
-        if dom_ok(host):
+        if not host:                             # 토큰 추출 실패도 침묵하지 않고 기록
+            rejected.append({"kind": "domain", "value": d,
+                             "reason": "빈 값 (토큰 추출 실패)"})
+            continue
+        if is_internal_asset(host):              # 내부 AD 존/하위 이름 → 자산
+            seen.add(host)
+            rejected.append({"kind": "domain", "value": d,
+                             "reason": "내부 자산 (IOC 아님)"})
+        elif dom_ok(host):
             seen.add(host)
             kept_doms.append(host)
         else:
