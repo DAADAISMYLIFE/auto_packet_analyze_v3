@@ -68,6 +68,10 @@ already judged this capture worth analyzing.
   goes ONLY in `attacks.target` — NEVER in iocs.c2/delivery/exfil/domains. Those iocs
   buckets are malware C2 / delivery / exfil endpoints only, never a host that was
   ATTACKED. Leave actor_scope/target_scope out — code fills them from the inventory.
+- A compromised host BEACONING to its OWN external C2 (malware phone-home) is NOT an
+  attacks[] entry — it is not attacking another host. Put that external C2 IP in
+  iocs.c2 and its domain in iocs.domains so it gets blocked, and mark the host
+  `compromised` in victims. Never model a victim's outbound C2 as the victim "attacking".
 
 # Task
 Grounded in the evidence, determine:

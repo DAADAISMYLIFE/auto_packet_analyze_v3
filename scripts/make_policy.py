@@ -49,6 +49,14 @@ def _is_cdn(ip):
         return False
 
 
+def _priv(ip):
+    """사설(내부) IPv4 여부. 외부 IP 를 격리룰로 잘못 내보내는 것 방지."""
+    try:
+        return ipaddress.ip_address(ip).is_private
+    except ValueError:
+        return False
+
+
 def make_rules(report):
     """report → (rules[list[str]], skipped[list[(kind,value)]]). 순수 함수, 결정론."""
     a = report.get("analysis") or {}
@@ -60,6 +68,10 @@ def make_rules(report):
                   if t.get("actor_scope") == "external" and t.get("actor")}
     isolate = {t["actor"] for t in attacks
                if t.get("actor_scope") == "internal" and t.get("actor")}
+    # 침해 확정된 내부 호스트도 격리(공격자든 피격자든 — 예: PsExec 로 서비스가 실행된 타겟).
+    # 외부 IP 오분류 방어로 사설대역만.
+    isolate |= {v["ip"] for v in (a.get("victims") or [])
+                if v.get("status") == "compromised" and _priv(v.get("ip") or "")}
     block_ips -= isolate                       # 내부 호스트는 IP차단 아니라 격리 룰로만
     block_doms = set(iocs.get("domains", []))
 

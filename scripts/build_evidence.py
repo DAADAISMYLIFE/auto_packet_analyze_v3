@@ -311,20 +311,24 @@ def build_lateral_movement(Z, hosts, read_ndjson):
     for d in read_ndjson(f"{Z}/smb_files.log"):
         s, dst = d.get("id.orig_h"), d.get("id.resp_h")
         act = (d.get("action") or "").upper()
+        path, name = d.get("path") or "", d.get("name") or ""
+        pu = path.upper()
+        admin_share = "ADMIN$" in pu or "C$" in pu   # PE 투하가 일어나는 관리자 공유
+        # 쓰기 액션이거나, 관리자 공유 파일 접근(PsExec 투하는 FILE_OPEN 로만 찍힘) → 팩트로 노출
         if s in hosts and dst in hosts and s != dst \
-           and any(w in act for w in SMB_WRITE_ACTIONS):
-            path = d.get("path") or d.get("name")
-            if path:
-                pair[(s, dst)]["smb_writes"].append(path)
+           and (any(w in act for w in SMB_WRITE_ACTIONS) or admin_share):
+            full = (path + "\\" + name).strip("\\") if name else path
+            if full:
+                pair[(s, dst)]["smb_writes"].append(full)
 
     buckets = {"ad_authentication": [], "workstation_to_workstation": [],
                "unclassified": []}
     for (s, dst), p in pair.items():
         role = hosts[dst].get("role")
         entry = {"src": s, "dst": dst, "dst_role": role, "events": p["events"],
-                 "dcerpc_ops": [op for op, _ in p["dcerpc_ops"].most_common(12)],
+                 "dcerpc_ops": {op: n for op, n in p["dcerpc_ops"].most_common(12)},
                  "smb_shares": sorted(p["smb_shares"]),
-                 "smb_writes": p["smb_writes"][:5]}
+                 "smb_writes": sorted(set(p["smb_writes"]))[:5]}
         if role in ("domain_controller", "dns_server"):
             buckets["ad_authentication"].append(entry)
         elif role == "workstation":
@@ -334,10 +338,13 @@ def build_lateral_movement(Z, hosts, read_ndjson):
     for k in ("ad_authentication", "workstation_to_workstation", "unclassified"):
         buckets[k].sort(key=lambda x: -x["events"])
 
-    buckets["_note"] = ("dcerpc_ops/smb_writes are facts, not verdicts. svcctl "
-                        "OpenSCManager2 alone is a probe; CreateServiceW or an "
-                        "ADMIN$/C$ smb_write is actual remote execution. "
-                        "ad_authentication is normal AD traffic toward infra.")
+    buckets["_note"] = ("dcerpc_ops maps each operation to its COUNT — weigh the counts, "
+                        "not just presence. svcctl OpenSCManager2 alone is a probe; "
+                        "CreateServiceW or an ADMIN$/C$ smb_write is actual remote execution. "
+                        "Bucket names reflect dst role ONLY, not a verdict: a few auth ops "
+                        "toward a DC are normal, but hundreds of repeated Netlogon auth ops "
+                        "(NetrServerReqChallenge / NetrServerAuthenticate3) are a credential/"
+                        "privilege attack (e.g. Zerologon), NOT normal authentication.")
     return buckets
 
 
