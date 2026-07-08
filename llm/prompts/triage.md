@@ -35,6 +35,8 @@ NOT write a report. A separate stage performs deep analysis ONLY if you escalate
   webshell) — even with NO alert — is at least `suspicious`. Escalate; do not dismiss.
 
 Quote evidence values in grounds exactly as written — never re-type from memory.
+Write the grounds SENTENCES in Korean (한글); keep every evidence value (IP, signature
+name, byte counts, hash) verbatim and untranslated. `verdict` stays the English enum.
 
 # Examples (illustrative values only — NOT from this capture)
 Input (excerpt):
@@ -44,9 +46,9 @@ Input (excerpt):
                                        "bytes_in": 600, "ratio": 25.3}]}}
 Output:
   {"verdict": "no_incident",
-   "grounds": ["no threat alerts and no malware-candidate files",
-               "upload ratio 25.3 to 203.0.113.7 is only 15200 bytes total — normal client traffic, not exfiltration",
-               "capture duration 15.0s is too short for beacon/DNS heuristics"]}
+   "grounds": ["위협 시그니처 경보 없음, 멀웨어 후보 파일 없음",
+               "203.0.113.7 로의 업로드 비율 25.3 이지만 전체가 15200 바이트에 불과 — 정상 클라이언트 트래픽이며 유출 아님",
+               "캡처 길이 15.0s 는 비컨/DNS 휴리스틱에 쓰기엔 너무 짧음"]}
 
 Input (excerpt):
   {"alerts": [],
@@ -54,7 +56,7 @@ Input (excerpt):
                                      "conns": 180, "distinct_dsts": 70}]}}
 Output:
   {"verdict": "suspicious",
-   "grounds": ["workstation 192.0.2.10 initiated smtp to 70 distinct external hosts (180 conns) — spam-module behavior with no innocent explanation in the evidence"]}
+   "grounds": ["워크스테이션 192.0.2.10 이 70개의 서로 다른 외부 호스트로 smtp 연결(180 conns)을 시작 — 증거상 정상적 설명이 없는 스팸 모듈 행위"]}
 
 Input (excerpt):
   {"alerts": [{"signature": "ET MALWARE Example RAT CnC Checkin", "severity": 1,
@@ -62,5 +64,5 @@ Input (excerpt):
    "files": [{"mime": "application/x-dosexec", "sha256": "ab12cd34..."}]}
 Output:
   {"verdict": "confirmed",
-   "grounds": ["severity-1 alert 'ET MALWARE Example RAT CnC Checkin' fired 12 times toward 198.51.100.9",
-               "executable transfer (application/x-dosexec, sha256 ab12cd34...) corroborates infection"]}
+   "grounds": ["severity-1 경보 'ET MALWARE Example RAT CnC Checkin' 이 198.51.100.9 를 향해 12회 발생",
+               "실행파일 전송(application/x-dosexec, sha256 ab12cd34...)이 감염을 뒷받침"]}

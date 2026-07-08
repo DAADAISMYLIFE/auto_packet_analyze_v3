@@ -104,11 +104,12 @@ Return a SINGLE JSON object. Copy every IP / domain / hash EXACTLY from the evid
     - hashes: sha256/md5 of malware-candidate files in the evidence (files[]); [] if none.
 - timeline: array of {ts, host, event}, ascending by ts. ts is the epoch-seconds
   NUMBER copied verbatim from the evidence — never convert, round, or re-format it.
+  Write `event` in Korean (한글); keep IP/domain/hash/signature/uri values verbatim.
 - patient_zero: ip of the host infected FIRST.
 - anomaly_analysis: array of strings — for EVERY `anomalies` entry, one line linking
   it to the incident or dismissing it with a reason. Never omit an entry silently.
 - assessment: verdict recap + one line on coverage limits (signature + behavior only;
-  encrypted payloads not inspected).
+  encrypted payloads not inspected). Write it in Korean (한글).
 - attacks: array — OMIT or [] when there is no attack. One entry per attack (web or
   otherwise) observed in the evidence:
     - technique: path_traversal / sqli / xss / command_injection / lfi_rfi /
@@ -122,7 +123,11 @@ Return a SINGLE JSON object. Copy every IP / domain / hash EXACTLY from the evid
      produce them.)
 
 # Language
-Reason in English. (The final human-facing report is rendered later, in Korean.)
+Reason in English internally. But the two fields copied VERBATIM into the final Korean
+report — `timeline[].event` and `assessment` — must be WRITTEN IN KOREAN (한글). Keep
+every indicator value (IP, domain, hash, signature name, uri) verbatim and untranslated
+inside those Korean sentences. All other fields (enums, iocs, host facts,
+executive_summary) are unchanged.
 
 # Examples (illustrative values only — NOT from this capture; copy the SHAPE, not the data)
 
