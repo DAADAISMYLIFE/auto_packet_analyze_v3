@@ -338,13 +338,11 @@ def build_lateral_movement(Z, hosts, read_ndjson):
     for k in ("ad_authentication", "workstation_to_workstation", "unclassified"):
         buckets[k].sort(key=lambda x: -x["events"])
 
-    buckets["_note"] = ("dcerpc_ops maps each operation to its COUNT — weigh the counts, "
-                        "not just presence. svcctl OpenSCManager2 alone is a probe; "
-                        "CreateServiceW or an ADMIN$/C$ smb_write is actual remote execution. "
-                        "Bucket names reflect dst role ONLY, not a verdict: a few auth ops "
-                        "toward a DC are normal, but hundreds of repeated Netlogon auth ops "
-                        "(NetrServerReqChallenge / NetrServerAuthenticate3) are a credential/"
-                        "privilege attack (e.g. Zerologon), NOT normal authentication.")
+    buckets["_note"] = ("dcerpc_ops maps each RPC operation to its occurrence COUNT; "
+                        "smb_writes lists files written to (or dropped on) SMB shares. "
+                        "Bucket names (ad_authentication / workstation_to_workstation / "
+                        "unclassified) reflect the destination host's role ONLY and are "
+                        "NOT verdicts. These are raw facts — judge them yourself.")
     return buckets
 
 
