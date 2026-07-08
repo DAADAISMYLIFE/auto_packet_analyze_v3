@@ -16,7 +16,7 @@
   - 각 값은 형식검증(유효 IPv4 / 도메인) 통과분만 룰화 — 깨진 값이 룰로 새는 것 방지.
   - 해시는 보류(사용자 결정 대기).
 """
-import sys, os, json, re, subprocess
+import sys, os, json, re, subprocess, ipaddress
 
 SID_BASE = 1000000
 _IPV4 = re.compile(r"^(?:\d{1,3}\.){3}\d{1,3}$")
@@ -27,6 +27,26 @@ def _valid_ip(s):
     if not _IPV4.match(str(s)):
         return False
     return all(0 <= int(o) <= 255 for o in str(s).split("."))
+
+
+# 공유 CDN 엣지 대역 (사업자 공시 소유대역). 이 IP 는 수천 사이트가 공유하는 엣지라
+# drop ip 로 막으면 Cloudflare/Fastly 전체가 막힌다(부수피해). 악성 '도메인'은
+# tls.sni/dns.query 룰이 공유 IP 위에서도 그 호스트만 정확히 잡으므로, CDN IP 는
+# IP차단에서 빼고 도메인 룰에 맡긴다. (Cloudflare: cloudflare.com/ips-v4, Fastly 주대역)
+_CDN_NETS = [ipaddress.ip_network(c) for c in (
+    "173.245.48.0/20", "103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22",
+    "141.101.64.0/18", "108.162.192.0/18", "190.93.240.0/20", "188.114.96.0/20",
+    "197.234.240.0/22", "198.41.128.0/17", "162.158.0.0/15", "104.16.0.0/13",
+    "104.24.0.0/14", "172.64.0.0/13", "131.0.72.0/22",   # ── Cloudflare
+    "151.101.0.0/16",                                     # ── Fastly
+)]
+
+
+def _is_cdn(ip):
+    try:
+        return any(ipaddress.ip_address(ip) in n for n in _CDN_NETS)
+    except ValueError:
+        return False
 
 
 def make_rules(report):
@@ -44,6 +64,11 @@ def make_rules(report):
     block_doms = set(iocs.get("domains", []))
 
     rules, sid, skipped = [], SID_BASE, []
+    cdn_ips = {ip for ip in block_ips if _valid_ip(ip) and _is_cdn(ip)}
+    block_ips -= cdn_ips                        # ── 공유 CDN 엣지: IP-drop 제외(부수피해 방지) ──
+    for ip in sorted(cdn_ips):                  #    조용히 버리지 않고 사유를 남긴다(도메인룰이 대체)
+        tag = "cdn-ip:도메인룰로대체" if block_doms else "cdn-ip:!경고-막을도메인없음-수동확인"
+        skipped.append((tag, ip))
     for ip in sorted(block_ips):               # ── 외부 악성 IP: 아웃바운드 drop ──
         if not _valid_ip(ip):
             skipped.append(("ip", ip)); continue
@@ -98,7 +123,7 @@ def main():
         f.write("\n".join(header + [""] + rules) + "\n")
     print(f"[policy] {out}  ({len(rules)} rules)")
     if skipped:
-        print(f"[policy] 건너뜀(형식오류) {len(skipped)}: {skipped[:5]}")
+        print(f"[policy] 건너뜀 {len(skipped)}건: {skipped[:8]}")
     if "--validate" in sys.argv:
         ok, msg = validate(out)
         tag = "PASS" if ok else ("SKIP(suricata 없음)" if ok is None else "FAIL")

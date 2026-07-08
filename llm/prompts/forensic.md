@@ -108,8 +108,9 @@ Return a SINGLE JSON object. Copy every IP / domain / hash EXACTLY from the evid
 - patient_zero: ip of the host infected FIRST.
 - anomaly_analysis: array of strings — for EVERY `anomalies` entry, one line linking
   it to the incident or dismissing it with a reason. Never omit an entry silently.
-- assessment: verdict recap + one line on coverage limits (signature + behavior only;
-  encrypted payloads not inspected). Write it in Korean (한글).
+- assessment: one Korean (한글) sentence — recap the verdict, then append the coverage
+  limit as this exact Korean clause: "탐지는 시그니처·행동 기반으로 한정되며 암호화된
+  페이로드는 검사하지 못했습니다." Do not copy the English words here into the output.
 - attacks: array — OMIT or [] when there is no attack. One entry per attack (web or
   otherwise) observed in the evidence:
     - technique: path_traversal / sqli / xss / command_injection / lfi_rfi /
