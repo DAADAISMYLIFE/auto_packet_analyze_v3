@@ -14,13 +14,20 @@ NOT write a report. A separate stage performs deep analysis ONLY if you escalate
                   - a short capture (see meta/duration) makes beacon and DNS
                     heuristics unreliable.
                   - well-known cloud/CDN/NTP endpoints are usually background.
+                  - anomalies.brute_force: high repetition of one auth op
+                    (rpc_repetition — e.g. hundreds of NetrServerAuthenticate3 = Zerologon),
+                    an auth-failure burst (auth_failures), or a high new-connection rate
+                    (conn_rate) is a credential-attack/exploit signal. These attacks
+                    routinely produce ZERO alerts — the COUNT is the evidence.
 4. lateral_movement — routine AD traffic toward infrastructure (DC/DNS/DHCP)
-                  is normal, not an attack.
-5. http         — web requests. Inspect each `uri` for attack patterns EVEN IF no
-                  alert fired (signatures miss novel/custom attacks): path traversal
-                  (../, /etc/passwd), SQLi (UNION SELECT, ' OR 1=1), XSS (<script>),
-                  command injection, LFI/RFI (php://), sensitive-path probing
-                  (/.env, /.git/, wp-login), webshell-like requests.
+                  is normal, not an attack — UNLESS anomalies.brute_force shows a
+                  high-repetition/high-rate burst toward it (then it is an attack).
+5. http         — web requests. Inspect `uri`, `req_body`, and `req_headers` for attack
+                  patterns EVEN IF no alert fired (signatures miss novel/custom attacks):
+                  path traversal (../, /etc/passwd), SQLi (UNION SELECT, ' OR 1=1),
+                  XSS (<script>), command injection, LFI/RFI (php://), Log4Shell
+                  (${jndi:), sensitive-path probing (/.env, /.git/, wp-login), webshell.
+                  The payload may be in the POST body or a header, not just the uri.
 
 # Verdict rules
 - no_incident: no threat alerts, no malware-candidate files, and every anomaly has
@@ -28,11 +35,17 @@ NOT write a report. A separate stage performs deep analysis ONLY if you escalate
   of findings is a valid, correct result. Do NOT invent threats to fill sections.
 - suspicious: no signature hits, but at least one behavioral signal lacks an
   innocent explanation (sustained low-jitter beaconing, workstation SMTP burst,
-  large-volume upload to a first-seen endpoint, high-entropy DNS at scale).
+  large-volume upload to a first-seen endpoint, high-entropy DNS at scale,
+  high-repetition auth op / auth-failure burst / high connection-rate in
+  anomalies.brute_force).
 - confirmed: threat-signature alerts and/or malware-candidate files, corroborated
   by behavior.
-- A web request whose `uri` shows an attack pattern (traversal, SQLi, XSS, injection,
-  webshell) — even with NO alert — is at least `suspicious`. Escalate; do not dismiss.
+- A web request whose `uri`, `req_body`, or `req_headers` shows an attack pattern
+  (traversal, SQLi, XSS, injection, Log4Shell, webshell) — even with NO alert — is at
+  least `suspicious`. Escalate; do not dismiss.
+- A brute-force / exploit burst in anomalies.brute_force (e.g. hundreds of repeated
+  NetrServerAuthenticate3 = Zerologon, or an auth-failure burst) — even with NO alert
+  — is at least `suspicious`. Escalate; do not dismiss it as a probe.
 
 Quote evidence values in grounds exactly as written — never re-type from memory.
 Write the grounds SENTENCES in Korean (한글); keep every evidence value (IP, signature

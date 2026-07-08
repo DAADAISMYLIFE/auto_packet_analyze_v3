@@ -138,12 +138,13 @@ class Tools:
                 "background_domains": len(ext.get("domains", [])) - len(doms)}
 
     def get_http(self):
-        """웹 요청 전량(method/url/uri/status/UA/src) — 무필터.
+        """웹 요청 전량(method/url/uri/status/UA/src + req_body/resp_body/req_headers) — 무필터.
 
         get_external 은 alert-linked 만 통과시키지만 http 는 그러면 안 된다:
         traversal/injection 은 시그니처가 없어(=alert 없음) alert 로 거르면 사라진다.
-        alert 유무와 무관하게 전량 넘겨 LLM 이 URI 를 직접 판단하게 한다.
-        (토큰은 build_evidence 가 dedup+cap 으로 이미 관리.)
+        alert 유무와 무관하게 전량 넘겨 LLM 이 URI·body·헤더를 직접 판단하게 한다.
+        (req_body/resp_body/req_headers 는 http-bodies.zeek 가 채우면 존재 — POST/헤더 공격 가시화.
+         토큰은 build_evidence 가 dedup+cap 으로 이미 관리.)
         """
         return self.evidence.get("external", {}).get("http", [])
 
@@ -208,7 +209,9 @@ class Tools:
 
     def get_anomalies(self):
         """Collect signature-less behavioral measurements (beacon jitter, upload
-        ratio, no-DNS direct connects, odd ports, role deviation, DNS entropy).
+        ratio, no-DNS direct connects, odd ports, role deviation, DNS entropy, and
+        brute_force = repetition/rate/auth-failure counts for volumetric attacks
+        like Zerologon / password spray that signatures routinely miss).
         """
 
         return self.evidence.get("anomalies", {})

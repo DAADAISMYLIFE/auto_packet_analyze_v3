@@ -32,6 +32,17 @@ already judged this capture worth analyzing.
   (written file paths) on an admin share. If only probe-level ops with no writes
   are present, say "probing attempt, no evidence of execution" and keep the
   hosts independent.
+- VOLUME OVERRIDES the probe rule. The count/rate IS the signal. Check
+  `anomalies.brute_force`: if the SAME auth op repeats at high count
+  (`rpc_repetition`, e.g. hundreds of `NetrServerAuthenticate3` — this IS
+  Zerologon / CVE-2020-1472), or there is an auth-failure burst (`auth_failures`,
+  e.g. password spray / Kerberoasting), or a high new-connection rate to one
+  service (`conn_rate`), this is NOT a benign probe and NOT normal AD traffic —
+  EVEN toward a DC and EVEN with empty smb_writes. Signatures routinely MISS these
+  (single-connection-per-attempt exploits often produce ZERO Suricata alerts), so
+  do NOT wait for an alert. Treat it as a credential attack / exploit: mark the
+  targeted host `compromised` and record an `attacks[]` entry with
+  technique=`brute_force` (actor = the source, target = the attacked host).
 - If you cannot tell whether hosts are linked, treat them as independent and mark
   the relationship "unknown". Do not invent a chain to make the story cohere.
 
@@ -47,12 +58,23 @@ already judged this capture worth analyzing.
 
 # Web request inspection (`http`)
 - The `http` array lists web requests (method, url, uri, status, user_agent,
-  src_ips, dst_ip). Inspect EACH request for attack patterns — REGARDLESS of whether
-  an alert fired. A signature may simply not exist for the attack.
+  src_ips, dst_ip, and — when present — `req_body`, `resp_body`, `req_headers`).
+  Inspect EACH request for attack patterns — REGARDLESS of whether an alert fired.
+  A signature may simply not exist for the attack.
+- The payload is NOT only in the `uri`. Inspect ALL of these:
+  - `uri` / `url` — GET-based attacks and query strings.
+  - `req_body` — POST-based attacks live HERE (form-field SQLi, uploaded webshell
+    source `<?php`, JSON/command injection). A short/empty uri does NOT mean clean.
+  - `req_headers` — header-based attacks: Log4Shell (`${jndi:ldap://`, `${jndi:dns://`),
+    or SQLi/injection in Referer / X-Forwarded-For / Cookie / custom headers.
+- `resp_body` is the SUCCESS signal: an echoed SQL query, a database error string,
+  a reflected `<script>`, or leaked rows (usernames/passwords) means the attack
+  SUCCEEDED — set that attack's `disposition` to "succeeded", not "attempted".
 - Look for: path traversal (`../`, `/etc/passwd`, `%2e%2e`), SQL injection
-  (`UNION SELECT`, `' OR 1=1`), XSS (`<script>`), OS command injection, local/remote
-  file inclusion (`php://`, `=http://`), sensitive-path probing (`/.env`, `/.git/`,
-  `wp-login`, `phpMyAdmin`), webshell-like requests.
+  (`UNION SELECT`, `' OR 1=1`, `' OR 'A'='A`), XSS (`<script>`), OS command injection
+  (`; nc `, `|bash`, backticks), local/remote file inclusion (`php://`, `=http://`),
+  sensitive-path probing (`/.env`, `/.git/`, `wp-login`, `phpMyAdmin`), Log4Shell
+  (`${jndi:`), webshell upload/use.
 - Direction: read src -> dst. The host SENDING the attack is the ATTACKER (actor); the
   host RECEIVING it is the TARGET (victim). The target is NOT a C2 and is NOT an IOC —
   never place it in iocs. Do NOT force attack traffic into the malware-C2 model
@@ -119,11 +141,16 @@ Return a SINGLE JSON object. Copy every IP / domain / hash EXACTLY from the evid
   otherwise) observed in the evidence:
     - technique: path_traversal / sqli / xss / command_injection / lfi_rfi /
       sensitive_probe / port_scan / brute_force / other
+      (brute_force covers Zerologon / password spray / auth flooding from
+       anomalies.brute_force, not just web login brute force.)
     - actor: ip that PERFORMED the attack (copied from evidence)
     - target: ip that RECEIVED it (the victim). This is NOT a C2 — do NOT place it in iocs.
     - target_host: hostname/domain of the target, if known
-    - sample_uri: the offending request / uri, copied EXACTLY from the evidence
-    - disposition: succeeded / attempted / unknown (use the http status if present)
+    - sample_uri: the offending payload copied EXACTLY from the evidence — the `uri`,
+      OR the `req_body` / `req_headers` fragment when the attack is in the body/header,
+      OR the repeated op (e.g. "NetrServerAuthenticate3 x441") for a volumetric attack.
+    - disposition: succeeded / attempted / unknown (use the http status or resp_body
+      if present — an echoed query / error / leaked data in resp_body = succeeded)
     (actor_scope / target_scope are filled by code from the host inventory — do not
      produce them.)
 

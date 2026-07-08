@@ -36,12 +36,25 @@ CAP_EXTERNAL_SNI = 300
 CAP_ALERT_SAMPLE_CIDS = 3    # alert 시그니처별 드릴다운용 community_id 표본 수
 CAP_EXTERNAL_HTTP = 300      # 요청 URL dedup 후 최대 개수
 CAP_URL_LEN = 400            # 초장문 URI(쿼리스트링 유출 등) 방어용 길이 캡
+CAP_REQ_BODY = 512           # POST body 페이로드 — 판별엔 앞부분이면 충분 (컨텍스트 보호)
+CAP_RESP_BODY = 256          # 응답 body — 공격 성공 증거(SQL 에러/반사)의 앞부분만
+CAP_REQ_HDRS = 512           # 요청 헤더(Log4Shell/헤더 인젝션) — 앞부분만
 
 # ── anomalies 보고 하한/캡 (판단 기준 아님 — 표본 부족·크기 제한용, _floors 로 노출) ──
 ANOM_BEACON_MIN_CONNS = 5    # 이 미만이면 주기(지터) 계산 표본 부족
 ANOM_FANOUT_MIN_DSTS = 5     # 내부 fan-out 보고 하한
 ANOM_LIST_CAP = 15           # 각 목록 최대 길이
 ANOM_ENTROPY_MIN = 3.5       # DGA 후보 보고 하한 (첫 라벨 셰넌 엔트로피)
+
+# ── 브루트포스/반복형 공격 측정 하한 (판단 기준 아님 — 표본·크기 제한용) ──
+BRUTE_MIN_OPS = 20           # 동일 RPC/인증 op 반복 하한 (Zerologon 은 통상 256+)
+BRUTE_MIN_CONNS = 30         # 동일 src→dst:port 새 연결 폭주 하한
+BRUTE_MIN_FAILS = 10         # 인증 실패 버스트 하한
+# netlogon 계열(Zerologon 악용)·원격서비스 등 반복되면 자격증명 공격 신호인 RPC op
+AUTH_RPC_OPS = {"NetrServerAuthenticate", "NetrServerAuthenticate2",
+                "NetrServerAuthenticate3", "NetrServerReqChallenge",
+                "NetrServerPasswordSet", "NetrServerPasswordSet2",
+                "NetrLogonSamLogon", "NetrLogonSamLogonWithFlags"}
 WELL_KNOWN_PORTS = {21, 22, 25, 53, 80, 110, 123, 143, 443, 465, 587,
                     993, 995, 3478, 8080, 8443}
 WS_ODD_EGRESS_PORTS = {25: "smtp", 465: "smtps", 587: "submission",
@@ -346,6 +359,78 @@ def build_lateral_movement(Z, hosts, read_ndjson):
     return buckets
 
 
+def build_bruteforce(conn, Z, hosts, read_ndjson):
+    """반복·속도·인증실패를 '측정만' 한다 (무시그니처 브루트포스/exploit 대비 채널).
+
+    왜: Suricata 시그니처는 단발연결 반복형 공격에서 곧잘 0건이 된다 — Zerologon
+    (CVE-2020-1472)은 매 시도마다 새 TCP 연결 + 캡처 체크섬 문제로 룰이 app-layer 까지
+    못 가 룰셋에 있어도 안 터진다. 그래도 공격은 행동의 '양'으로 드러난다:
+      - rpc_repetition : 동일 DCERPC op 를 (src,dst)로 N회 반복 (netlogon 악용/정찰 폭주)
+      - auth_failures  : kerberos/ntlm 인증 실패 버스트 (password spray/브루트포스)
+      - conn_rate      : 동일 src→dst:port 로 초당 다수 새 연결 (브루트포스/스캔)
+    원칙(기존 anomalies 와 동일): 수치만 계산해 노출 — '공격이냐'는 LLM 이 맥락으로 판단한다.
+    하한(_floors)은 표본·크기 제한용이며 판단 기준이 아니다.
+    """
+    # 1) 동일 DCERPC op 반복 (Zerologon: 수백 회 NetrServerAuthenticate3)
+    ops = defaultdict(Counter)
+    for d in read_ndjson(f"{Z}/dce_rpc.log"):
+        s, dst, op = d.get("id.orig_h"), d.get("id.resp_h"), d.get("operation")
+        if s in hosts and dst in hosts and s != dst and op:
+            ops[(s, dst)][op] += 1
+    rpc_rep = []
+    for (s, dst), c in ops.items():
+        for op, n in c.items():
+            # 인증계열은 하한, 그 외 op 는 명백한 폭주(×5)만 (정상 RPC 노이즈 억제)
+            if (op in AUTH_RPC_OPS and n >= BRUTE_MIN_OPS) or n >= BRUTE_MIN_OPS * 5:
+                rpc_rep.append({"src": s, "dst": dst, "operation": op, "count": n})
+    rpc_rep.sort(key=lambda x: -x["count"])
+
+    # 2) 인증 실패 버스트 (kerberos error / ntlm success=false)
+    fails = defaultdict(lambda: {"count": 0, "proto": set()})
+    for d in read_ndjson(f"{Z}/kerberos.log"):
+        if d.get("success") is False or d.get("error_msg"):
+            k = (d.get("id.orig_h"), d.get("id.resp_h"))
+            fails[k]["count"] += 1
+            fails[k]["proto"].add("kerberos")
+    for d in read_ndjson(f"{Z}/ntlm.log"):
+        if d.get("success") is False:
+            k = (d.get("id.orig_h"), d.get("id.resp_h"))
+            fails[k]["count"] += 1
+            fails[k]["proto"].add("ntlm")
+    auth_fail = [{"src": s, "dst": dst, "fails": v["count"], "proto": sorted(v["proto"])}
+                 for (s, dst), v in fails.items() if v["count"] >= BRUTE_MIN_FAILS]
+    auth_fail.sort(key=lambda x: -x["fails"])
+
+    # 3) 새 연결 폭주율 (동일 src→dst:port 로 짧은 창에 다수 연결)
+    rate = defaultdict(list)
+    for d in conn:
+        ts = d.get("ts")
+        if ts is not None:
+            rate[(d.get("id.orig_h"), d.get("id.resp_h"), d.get("id.resp_p"))].append(ts)
+    conn_rate = []
+    for (s, dst, p), tss in rate.items():
+        if len(tss) < BRUTE_MIN_CONNS:
+            continue
+        span = (max(tss) - min(tss)) or 1
+        conn_rate.append({"src": s, "dst": dst, "port": p, "conns": len(tss),
+                          "span_s": round(span, 1),
+                          "conns_per_s": round(len(tss) / span, 1)})
+    conn_rate.sort(key=lambda x: -x["conns_per_s"])
+
+    cap = ANOM_LIST_CAP
+    return {
+        "_floors": {"rpc_min_ops": BRUTE_MIN_OPS, "conn_min": BRUTE_MIN_CONNS,
+                    "fail_min": BRUTE_MIN_FAILS, "list_cap": cap,
+                    "note": "counts/rates only — high repetition of an auth op, an "
+                            "auth-failure burst, or a high new-connection rate suggests "
+                            "brute force / credential attack / exploit (e.g. Zerologon, "
+                            "password spray). Maliciousness is NOT judged here."},
+        "rpc_repetition": rpc_rep[:cap],
+        "auth_failures": auth_fail[:cap],
+        "conn_rate": conn_rate[:cap],
+    }
+
+
 # ---------------------------------------------------------------------------
 def build_evidence(name, root="/home/qkekdhd/auto_packet_analyze_v3"):
     base = os.path.join(root, "output", name)
@@ -405,12 +490,21 @@ def build_evidence(name, root="/home/qkekdhd/auto_packet_analyze_v3"):
         if not (host or uri):
             continue
         url = f"{host or d.get('id.resp_h') or ''}{uri or ''}"[:CAP_URL_LEN]
+        # http-bodies.zeek 가 남긴 본문/헤더 (없으면 None). 공격이 URL 밖(POST body·헤더)에
+        # 있을 때 유일한 단서 — 판단은 LLM, 여기선 앞부분만 캡해서 실어 나른다.
+        req_body = (d.get("req_body") or "")[:CAP_REQ_BODY] or None
+        resp_body = (d.get("resp_body") or "")[:CAP_RESP_BODY] or None
+        req_headers = (d.get("req_headers") or "")[:CAP_REQ_HDRS] or None
         if d.get("uid") and d["uid"] not in url_of_uid:
             url_of_uid[d["uid"]] = url
-        e = ext_http.setdefault((d.get("method"), host, uri), {
+        # dedup 키에 body 앞부분을 포함 — 같은 URL 이라도 POST 페이로드가 다르면 별개 요청으로
+        # 보존한다(브루트포스/sqlmap 의 서로 다른 시도가 하나로 뭉개지지 않게). 초과분은 _truncation.
+        body_key = (req_body or "")[:120]
+        e = ext_http.setdefault((d.get("method"), host, uri, body_key), {
             "url": url, "method": d.get("method"),
             "dst_ip": d.get("id.resp_h"), "status": None,
             "user_agent": d.get("user_agent"),
+            "req_body": req_body, "resp_body": resp_body, "req_headers": req_headers,
             "src_ips": set(), "count": 0, "first_ts": None,
         })
         e["count"] += 1
@@ -546,6 +640,17 @@ def build_evidence(name, root="/home/qkekdhd/auto_packet_analyze_v3"):
         return c.most_common(1)[0][0] if c else None
 
     dc_ip = top_internal_resp(["kerberos.log", "ldap.log", "ldap_search.log"])
+    if dc_ip is None:
+        # kerberos/ldap 이 없는 캡처(순수 exploit 등) 대비: netlogon/drsuapi RPC 를 가장 많이
+        # 받는 내부 호스트 = DC 후보. (Zerologon pcap 은 kerberos 가 없어 DC 가 role=None 으로
+        # unclassified 에 파묻히던 문제를 보강 — 공격받는 DC 를 보고서가 식별하게.)
+        rpc_dc = Counter()
+        for d in read_ndjson(f"{Z}/dce_rpc.log") or []:
+            rh = d.get("id.resp_h")
+            if rh in hosts and (d.get("operation") in AUTH_RPC_OPS
+                                or d.get("endpoint") in ("netlogon", "drsuapi", "lsarpc")):
+                rpc_dc[rh] += 1
+        dc_ip = rpc_dc.most_common(1)[0][0] if rpc_dc else None
     dns_ip = top_internal_resp(["dns.log"])
     for ip, h in hosts.items():
         if ip == dc_ip:
@@ -622,6 +727,11 @@ def build_evidence(name, root="/home/qkekdhd/auto_packet_analyze_v3"):
     cap_start = min(conn_ts) if conn_ts else None
     cap_end = max(conn_ts) if conn_ts else None
 
+    # anomalies = 무시그니처 행동 측정. brute_force(반복/속도/인증실패)를 같은 채널에 합류
+    #   → get_anomalies 로 자동 노출되어 LLM 이 시그니처 0건이어도 '양'으로 판단 가능.
+    anomalies = build_anomalies(conn, hosts, dns_recs)
+    anomalies["brute_force"] = build_bruteforce(conn, Z, hosts, read_ndjson)
+
     evidence = {
         "meta": {
             "pcap": name,
@@ -637,7 +747,7 @@ def build_evidence(name, root="/home/qkekdhd/auto_packet_analyze_v3"):
         "files": files,
         "external": external,
         "lateral_movement": lateral_movement,
-        "anomalies": build_anomalies(conn, hosts, dns_recs),
+        "anomalies": anomalies,
         "_truncation": trunc,
     }
     return evidence
@@ -665,6 +775,10 @@ def main():
     print(f"  anomalies: beacons={len(an['beacons'])} exfil={len(an['exfil_candidates'])} "
           f"no_dns={len(an['no_dns_direct'])} odd_ports={len(an['odd_ports'])} "
           f"role_dev={len(an['role_deviation'])} fanout={len(an['internal_fanout'])}")
+    bf = an.get("brute_force", {})
+    print(f"  brute_force: rpc_rep={len(bf.get('rpc_repetition', []))} "
+          f"auth_fails={len(bf.get('auth_failures', []))} "
+          f"conn_rate={len(bf.get('conn_rate', []))}")
     if ev["_truncation"]:
         print(f"  _truncation={ev['_truncation']}")
 

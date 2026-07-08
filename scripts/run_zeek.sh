@@ -8,6 +8,7 @@ set -euo pipefail
 
 PCAP="${1:?사용법: run_zeek.sh <pcap파일>}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SCRIPTS_DIR="$ROOT/scripts"
 PCAP_ABS="$(realpath "$PCAP")"
 PCAP_DIR="$(dirname "$PCAP_ABS")"
 PCAP_NAME="$(basename "$PCAP_ABS")"
@@ -34,7 +35,8 @@ if command -v zeek >/dev/null 2>&1; then
   # ── 네이티브 zeek (Colab 등) ──
   echo "[zeek] 네이티브 zeek 사용 ($(zeek --version 2>/dev/null | head -1))"
   # native zeek 8.x 는 hash-all-files 로 sha256 이 안 켜짐 → 명시적 해시 스크립트 추가
-  if ( cd "$OUT" && zeek -C -r "$PCAP_ABS" LogAscii::use_json=T $ZEEK_SCRIPTS "$ROOT/scripts/hash-files.zeek" ); then
+  # http-bodies.zeek : req/resp 본문 + 요청 헤더를 http.log 에 남김 (URL 밖 페이로드 가시화)
+  if ( cd "$OUT" && zeek -C -r "$PCAP_ABS" LogAscii::use_json=T $ZEEK_SCRIPTS "$ROOT/scripts/hash-files.zeek" "$ROOT/scripts/http-bodies.zeek" ); then
     OK=1
   else
     OK=0
@@ -43,13 +45,15 @@ elif docker info >/dev/null 2>&1; then
   # ── docker zeek (로컬 기본) ──
   echo "[zeek] docker zeek/zeek:latest 사용"
   # --user : host 유저 권한으로 실행 (root 소유 파일 생성 방지 → 청소 가능)
+  # -v scripts:/scripts : http-bodies.zeek(로컬) 를 컨테이너에서 로드하려면 마운트 필요
   if docker run --rm \
     --user "$(id -u):$(id -g)" \
     -v "$PCAP_DIR":/pcap:ro \
     -v "$OUT":/out \
+    -v "$SCRIPTS_DIR":/scripts:ro \
     -w /out \
     zeek/zeek:latest \
-    zeek -C -r "/pcap/$PCAP_NAME" LogAscii::use_json=T $ZEEK_SCRIPTS; then
+    zeek -C -r "/pcap/$PCAP_NAME" LogAscii::use_json=T $ZEEK_SCRIPTS /scripts/http-bodies.zeek; then
     OK=1
   else
     OK=0
