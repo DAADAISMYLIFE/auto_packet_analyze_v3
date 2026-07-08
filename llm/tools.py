@@ -216,6 +216,19 @@ class Tools:
 
         return self.evidence.get("anomalies", {})
 
+    def get_signals(self):
+        """Protocol-agnostic signal layer (no per-log function, no tool-calling):
+        - techniques: RPC ops LABELED via a lookup table (execution=WMI/DCOM/PsExec/
+          schtasks, cred_theft=DCSync, cred_attack=Zerologon, recon=AD enum) —
+          surfaced REGARDLESS of smb_writes or lateral_movement bucket.
+        - zeek_weird: Zeek's own protocol-anomaly detections (weird.log).
+        - protocol_summary: every other log (rdp/ssh/ftp/smtp/… and future logs)
+          auto-summarized as (src,dst,port,count).
+        - logs_present: which logs existed (what was / was not observed).
+        This is the catch-all the per-protocol views miss (e.g. WMI lateral movement).
+        """
+        return self.evidence.get("signals", {})
+
     # ===================== 해시 provenance (원본 로그 조인, 코드 전용) =====================
     #  attach_hashes 오탐 방지 전용 최소 리더 — LLM 에 노출하는 tier2 는 만들지 않는다.
     #  업데이트/텔레메트리 인프라가 서빙한 실행파일은 멀웨어가 아님(MS Defender 업데이트 등).

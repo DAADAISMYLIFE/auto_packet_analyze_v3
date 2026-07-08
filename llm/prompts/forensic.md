@@ -95,6 +95,25 @@ already judged this capture worth analyzing.
   iocs.c2 and its domain in iocs.domains so it gets blocked, and mark the host
   `compromised` in victims. Never model a victim's outbound C2 as the victim "attacking".
 
+# Signal layer (`signals`) — protocol-agnostic; catches what the per-protocol views miss
+The `lateral_movement` bucketing only recognizes SMB/PsExec-shaped attacks. `signals`
+covers the rest via a meaning lookup table, so WMI/DCOM/schtasks/RDP/SSH are not invisible.
+- `signals.techniques`: RPC operations LABELED with a category and meaning. This is the
+  authoritative execution signal — read it FIRST:
+  - `category: "execution"` (WMI ExecMethod, DCOM RemoteCreateInstance, svcctl
+    CreateServiceW, schtasks SchRpcRegister) IS remote code execution / lateral movement.
+    Treat it as such REGARDLESS of the lateral_movement bucket and REGARDLESS of empty
+    smb_writes — WMI and DCOM never touch SMB, so an empty smb_writes does NOT clear them.
+    Mark BOTH src and dst `compromised` and add an `attacks[]` entry (technique from the label).
+  - `category: "cred_theft"` (DsGetNCChanges = DCSync) and `category: "cred_attack"`
+    (Zerologon netlogon) are equally serious — never dismiss as normal AD.
+- `signals.zeek_weird`: Zeek's OWN protocol-anomaly detections. A `high`-severity entry
+  (e.g. netlogon_dce_rpc_auth_type = Zerologon) corroborates an attack — do not ignore.
+- `signals.protocol_summary`: every other protocol present (rdp, ssh, ftp, smtp, …) as
+  (src,dst,port,count). Internal→internal RDP/SSH, or outbound FTP/SMTP from a workstation,
+  deserves scrutiny even with no signature.
+- `signals.logs_present`: index of which logs exist — grounds what was and was NOT observed.
+
 # Task
 Grounded in the evidence, determine:
 1. Victims / internal hosts: ip, mac, hostname, username, role.
@@ -106,9 +125,11 @@ Grounded in the evidence, determine:
    seconds — compare them numerically (smaller = earlier). hosts[].first_ts /
    last_ts give each host's activity window; alerts/files/external first_ts give
    event times. Identify which host was infected FIRST.
-Address every `anomalies` entry: either connect it to the incident or dismiss it
-with a stated reason. Report every item. If unknown, mark it "unknown" — never
-omit silently, never fabricate.
+Address every `anomalies` entry AND every `signals.techniques` / high-severity
+`signals.zeek_weird` entry: either connect it to the incident or dismiss it with a
+stated reason. Report every item. If unknown, mark it "unknown" — never omit
+silently, never fabricate. An `execution`/`cred_theft`/`cred_attack` technique may
+NOT be dismissed as benign AD.
 
 # Output (structured JSON — a schema enforces this shape)
 Return a SINGLE JSON object. Copy every IP / domain / hash EXACTLY from the evidence

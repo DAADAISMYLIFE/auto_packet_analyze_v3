@@ -23,7 +23,8 @@ def triage(tools):
         "http" : tools.get_http(),
         "files" : tools.get_files(),
         "lateral_movement" : tools.get_lateral_movement(),
-        "anomalies" : tools.get_anomalies()
+        "anomalies" : tools.get_anomalies(),
+        "signals" : tools.get_signals()
     }, ensure_ascii=False, default=str)
 
     res = chat(model=MODEL, format=VERDICT_SCHEMA,   # ← format이 강제 선택
@@ -59,7 +60,8 @@ def forensic(tools):
         "http" : tools.get_http(),
         "files" : tools.get_files(),
         "lateral_movement" : tools.get_lateral_movement(),
-        "anomalies" : tools.get_anomalies()
+        "anomalies" : tools.get_anomalies(),
+        "signals" : tools.get_signals()
     }, ensure_ascii=False, default=str)
 
     # format 강제 → 마크다운 산문이 아니라 REPORT_SCHEMA JSON 을 그대로 받는다

@@ -21,6 +21,7 @@ evidence 빌더 (파이프라인 3단계: 정규화 및 압축)
   - anomalies = 무시그니처 행동 측정치(비콘 주기, 업로드 비율, odd-port 등).
     수치만 계산해서 노출, 악성 판단은 LLM 몫. 하한/캡은 크기 제한용이며 _floors 에 명시.
 """
+import glob
 import json
 import math
 import os
@@ -431,6 +432,147 @@ def build_bruteforce(conn, Z, hosts, read_ndjson):
     }
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# 제네릭 신호 레이어 — 로그별 전용함수(40여 종) 대신 "모든 로그 1회 순회 + 의미 테이블".
+#   왜: tool-calling 이 없어 evidence 가 로그↔LLM 의 유일한 인터페이스다. 로그마다 전용
+#   함수를 짜면 캡처별로 다른 40여 종에 대응 불가 → 새 프로토콜/기법마다 사각지대.
+#   지식은 코드 분기가 아니라 아래 테이블에 둔다(새 기법 = 테이블 한 줄). 판단은 LLM.
+# ═══════════════════════════════════════════════════════════════════════════
+
+# RPC operation → (공격 단계, 의미, 최소 발생수). smb_writes·버킷과 무관하게 표면화.
+#   ★ 새 실행/정찰 기법 추가는 여기 한 줄 (WMI 사각지대를 이렇게 메운다).
+#   min_count: 이 op 가 '이상'이 되는 하한. netlogon 챌린지/인증·LSA 조회는 정상 AD 에서도
+#   쓰이는 dual-use → 고반복일 때만 공격(count 로 구분, brute_force 와 같은 원리). 실행/
+#   DCSync 는 워크스테이션에서 루틴이 아니므로 1회부터 노출. (정상 AD 오탐 방지)
+OP_MEANING = {
+    "CreateServiceW": ("execution", "svcctl 원격 서비스 생성 (PsExec 계열)", 1),
+    "CreateServiceA": ("execution", "svcctl 원격 서비스 생성 (PsExec 계열)", 1),
+    "CreateServiceWOW64W": ("execution", "svcctl 원격 서비스 생성 (PsExec 계열)", 1),
+    "StartServiceW": ("execution", "svcctl 서비스 시작 (원격 실행)", 1),
+    "SchRpcRegister": ("execution", "스케줄드 태스크 등록 (atsvc 원격 실행)", 1),
+    "SchRpcRun": ("execution", "스케줄드 태스크 즉시 실행", 1),
+    "NetrJobAdd": ("execution", "AT job 등록 (원격 실행)", 1),
+    "ExecMethod": ("execution", "WMI Win32_Process.Create 원격 실행 (wmiexec)", 1),
+    "ExecMethodAsync": ("execution", "WMI 비동기 메서드 실행 (원격 실행)", 1),
+    "RemoteCreateInstance": ("execution", "DCOM 원격 객체 생성 (dcomexec/MMC20 등)", 1),
+    "DsGetNCChanges": ("cred_theft", "DRSUAPI 복제 요청 (DCSync — 자격증명 대량 탈취)", 1),
+    "NetrServerPasswordSet2": ("cred_theft", "netlogon 머신 비밀번호 변경 (Zerologon 성공 단계)", 1),
+    "NetrServerReqChallenge": ("cred_attack", "netlogon 챌린지 고반복 (Zerologon 사전단계)", 20),
+    "NetrServerAuthenticate3": ("cred_attack", "netlogon 인증 고반복 (Zerologon 악용 지점)", 20),
+    "NetrServerAuthenticate2": ("cred_attack", "netlogon 인증 고반복 (Zerologon 악용 지점)", 20),
+    "DRSCrackNames": ("recon", "DRSUAPI 이름 변환 대량 (AD 정찰)", 50),
+    "LsarLookupNames3": ("recon", "LSA 이름→SID 대량 조회 (BloodHound 류 정찰)", 50),
+    "LsarLookupSids3": ("recon", "LSA SID→이름 대량 조회 (AD 정찰)", 50),
+    "SamrEnumerateDomainsInSamServer": ("recon", "SAMR 도메인 열거 (AD 정찰)", 50),
+}
+
+# Zeek weird.log 이름 → (심각도, 의미). Zeek 자체 이상탐지를 버리지 말고 실어 나른다.
+WEIRD_MEANING = {
+    "netlogon_dce_rpc_auth_type": ("high", "netlogon RPC 인증 타입 이상 (Zerologon 신호)"),
+    "HTTP_excessive_pipelining": ("medium", "HTTP 과도 파이프라이닝 (스캔/자동화 정황)"),
+    "dns_unmatched_reply": ("low", "DNS 응답 불일치"),
+}
+
+# 전용 추출기가 이미 있는 로그(제네릭 요약 제외) + 순수 노이즈(스킵)
+_SIG_COVERED = {"conn", "dns", "http", "ssl", "files", "dce_rpc", "smb_mapping",
+                "smb_files", "kerberos", "ntlm", "ldap", "ldap_search", "dhcp"}
+_SIG_NOISE = {"packet_filter", "ntp", "ocsp", "stats", "reporter", "weird",
+              "loaded_scripts", "capture_loss", "telemetry", "known"}
+SIG_CAP = 12
+
+
+def build_signals(Z, hosts, read_ndjson):
+    """전용함수 없이 '모든 zeek 로그 1회 순회 + 의미 테이블'로 신호를 뽑는다.
+
+      - techniques       : dce_rpc operation 을 OP_MEANING 으로 라벨링(WMI/DCOM/PsExec/
+                           DCSync/Zerologon/정찰). smb_writes·역할버킷과 무관하게 표면화.
+      - zeek_weird       : Zeek 가 이미 탐지한 프로토콜 이상(weird.log)을 그대로 전달.
+      - protocol_summary : 전용 추출기 없는 나머지 로그(rdp/ssh/ftp/smtp/… + 미래 로그)를
+                           제네릭하게 (src,dst,port)→count/first_ts 로 요약 (코드 0줄로 흡수).
+      - logs_present     : 어떤 로그가 있었나(=무엇이 관측/미관측인지) 인덱스.
+    지식은 코드가 아니라 테이블에 있다. 여긴 라벨 붙인 팩트만 — 판단은 LLM.
+    """
+    # 어떤 로그가 몇 줄 존재하나 (라인 카운트 — JSON 파싱 없이 저렴하게)
+    present = {}
+    for p in glob.glob(os.path.join(Z, "*.log")):
+        name = os.path.basename(p)[:-4]
+        try:
+            with open(p, encoding="utf-8") as f:
+                n = sum(1 for line in f if line.strip())
+        except OSError:
+            n = 0
+        if n:
+            present[name] = n
+
+    # 1) techniques — dce_rpc operation 을 의미 테이블로 라벨링 (집계 후 min_count 로 필터)
+    tech = {}
+    for d in read_ndjson(os.path.join(Z, "dce_rpc.log")):
+        meaning = OP_MEANING.get(d.get("operation"))
+        if not meaning:
+            continue
+        s, dst, op = d.get("id.orig_h"), d.get("id.resp_h"), d.get("operation")
+        cat, label, min_count = meaning
+        t = tech.setdefault((s, dst, op),
+                            {"category": cat, "label": label, "operation": op,
+                             "endpoint": d.get("endpoint"), "src": s, "dst": dst,
+                             "count": 0, "first_ts": None, "_min": min_count})
+        t["count"] += 1
+        ts = d.get("ts")
+        if ts and (t["first_ts"] is None or ts < t["first_ts"]):
+            t["first_ts"] = ts
+    prio = {"execution": 0, "cred_theft": 1, "cred_attack": 2, "recon": 3}
+    # dual-use op(netlogon 인증·LSA 조회)는 고반복일 때만 통과 → 정상 AD 오탐 억제
+    techniques = sorted((t for t in tech.values() if t["count"] >= t.pop("_min")),
+                        key=lambda x: (prio.get(x["category"], 9), -x["count"]))
+
+    # 2) zeek_weird — Zeek 자체 이상탐지 (name 별 src/dst 집계)
+    weird = {}
+    for d in read_ndjson(os.path.join(Z, "weird.log")):
+        nm = d.get("name")
+        if not nm:
+            continue
+        sev, desc = WEIRD_MEANING.get(nm, ("low", None))
+        w = weird.setdefault((nm, d.get("id.orig_h"), d.get("id.resp_h")),
+                             {"name": nm, "severity": sev, "meaning": desc,
+                              "src": d.get("id.orig_h"), "dst": d.get("id.resp_h"),
+                              "count": 0})
+        w["count"] += 1
+    sev_ord = {"high": 0, "medium": 1, "low": 2}
+    zeek_weird = sorted(weird.values(),
+                        key=lambda x: (sev_ord.get(x["severity"], 9), -x["count"]))
+
+    # 3) protocol_summary — 전용 추출기 없는 로그 제네릭 요약 (미래 로그 자동 포함)
+    proto = {}
+    for name in present:
+        if name in _SIG_COVERED or name in _SIG_NOISE:
+            continue
+        agg = {}
+        for d in read_ndjson(os.path.join(Z, f"{name}.log")):
+            k = (d.get("id.orig_h"), d.get("id.resp_h"), d.get("id.resp_p"))
+            e = agg.setdefault(k, {"src": k[0], "dst": k[1], "port": k[2],
+                                   "count": 0, "first_ts": None})
+            e["count"] += 1
+            ts = d.get("ts")
+            if ts and (e["first_ts"] is None or ts < e["first_ts"]):
+                e["first_ts"] = ts
+        rows = sorted(agg.values(), key=lambda x: -x["count"])[:SIG_CAP]
+        if rows:
+            proto[name] = rows
+
+    return {
+        "_note": ("protocol-agnostic pass over EVERY zeek log present; meaning labels come "
+                  "from a lookup table, these are raw facts (not verdicts). techniques: RPC "
+                  "ops indicating execution/cred-theft/cred-attack/recon REGARDLESS of "
+                  "smb_writes or lateral_movement bucket. zeek_weird: Zeek's own protocol-"
+                  "anomaly detections. protocol_summary: every other protocol (rdp/ssh/ftp/"
+                  "smtp/… and future logs) auto-summarized. Judge them yourself."),
+        "logs_present": present,
+        "techniques": techniques[:SIG_CAP],
+        "zeek_weird": zeek_weird[:SIG_CAP],
+        "protocol_summary": proto,
+    }
+
+
 # ---------------------------------------------------------------------------
 def build_evidence(name, root="/home/qkekdhd/auto_packet_analyze_v3"):
     base = os.path.join(root, "output", name)
@@ -748,6 +890,7 @@ def build_evidence(name, root="/home/qkekdhd/auto_packet_analyze_v3"):
         "external": external,
         "lateral_movement": lateral_movement,
         "anomalies": anomalies,
+        "signals": build_signals(Z, hosts, read_ndjson),
         "_truncation": trunc,
     }
     return evidence
@@ -779,6 +922,11 @@ def main():
     print(f"  brute_force: rpc_rep={len(bf.get('rpc_repetition', []))} "
           f"auth_fails={len(bf.get('auth_failures', []))} "
           f"conn_rate={len(bf.get('conn_rate', []))}")
+    sg = ev.get("signals", {})
+    print(f"  signals: techniques={len(sg.get('techniques', []))} "
+          f"weird={len(sg.get('zeek_weird', []))} "
+          f"protocols={list(sg.get('protocol_summary', {}))} "
+          f"logs={len(sg.get('logs_present', {}))}")
     if ev["_truncation"]:
         print(f"  _truncation={ev['_truncation']}")
 

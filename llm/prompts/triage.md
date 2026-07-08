@@ -22,6 +22,14 @@ NOT write a report. A separate stage performs deep analysis ONLY if you escalate
 4. lateral_movement — routine AD traffic toward infrastructure (DC/DNS/DHCP)
                   is normal, not an attack — UNLESS anomalies.brute_force shows a
                   high-repetition/high-rate burst toward it (then it is an attack).
+6. signals       — protocol-agnostic layer that catches what lateral_movement misses.
+                  signals.techniques with category execution (WMI ExecMethod, DCOM
+                  RemoteCreateInstance, PsExec CreateServiceW, schtasks), cred_theft
+                  (DCSync DsGetNCChanges), or cred_attack (Zerologon) = an attack even
+                  with NO alert and empty smb_writes. signals.zeek_weird high severity
+                  (netlogon_dce_rpc_auth_type) corroborates. signals.protocol_summary
+                  shows other protocols (rdp/ssh/ftp/smtp) — internal RDP/SSH or
+                  outbound ftp/smtp from a workstation is worth escalating.
 5. http         — web requests. Inspect `uri`, `req_body`, and `req_headers` for attack
                   patterns EVEN IF no alert fired (signatures miss novel/custom attacks):
                   path traversal (../, /etc/passwd), SQLi (UNION SELECT, ' OR 1=1),
@@ -46,6 +54,9 @@ NOT write a report. A separate stage performs deep analysis ONLY if you escalate
 - A brute-force / exploit burst in anomalies.brute_force (e.g. hundreds of repeated
   NetrServerAuthenticate3 = Zerologon, or an auth-failure burst) — even with NO alert
   — is at least `suspicious`. Escalate; do not dismiss it as a probe.
+- A signals.techniques entry with category execution / cred_theft / cred_attack (WMI,
+  DCOM, PsExec, schtasks, DCSync, Zerologon) — even with NO alert and empty smb_writes
+  — is at least `suspicious`. Escalate; do not dismiss it as normal AD.
 
 Quote evidence values in grounds exactly as written — never re-type from memory.
 Write the grounds SENTENCES in Korean (한글); keep every evidence value (IP, signature
