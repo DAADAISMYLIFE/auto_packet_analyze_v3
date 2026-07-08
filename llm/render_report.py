@@ -67,7 +67,7 @@ def render(name, report, rules_text):
     a = report.get("analysis") or {}
     if report.get("verdict") == "no_incident":
         # 사고 아님 → 서술 LLM 호출 안 함. 빈 분석을 주면 없는 C2 를 지어내는 환각이
-        # 발생하므로(cve-2020-1472 오답 사례) 코드가 중립 문구로 채운다.
+        # 발생하므로(과거 오답 사례) 코드가 중립 문구로 채운다.
         n = {"overview_ko": "이 캡처에서 위협 징후는 확인되지 않았습니다 (판정: no_incident).",
              "scenario_ko": "특이 공격 시나리오 없음 — 아래 판정 근거를 참조하십시오.",
              "recommendation_ko": "즉각 조치 불필요. 아래 근거를 검토 후 종결 여부를 판단하십시오."}

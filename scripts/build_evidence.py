@@ -39,7 +39,7 @@ CAP_EXTERNAL_HTTP = 300      # 요청 URL dedup 후 최대 개수
 CAP_URL_LEN = 400            # 초장문 URI(쿼리스트링 유출 등) 방어용 길이 캡
 CAP_REQ_BODY = 512           # POST body 페이로드 — 판별엔 앞부분이면 충분 (컨텍스트 보호)
 CAP_RESP_BODY = 256          # 응답 body — 공격 성공 증거(SQL 에러/반사)의 앞부분만
-CAP_REQ_HDRS = 512           # 요청 헤더(Log4Shell/헤더 인젝션) — 앞부분만
+CAP_REQ_HDRS = 512           # 요청 헤더(헤더 인젝션 페이로드) — 앞부분만
 
 # ── anomalies 보고 하한/캡 (판단 기준 아님 — 표본 부족·크기 제한용, _floors 로 노출) ──
 ANOM_BEACON_MIN_CONNS = 5    # 이 미만이면 주기(지터) 계산 표본 부족
@@ -48,10 +48,10 @@ ANOM_LIST_CAP = 15           # 각 목록 최대 길이
 ANOM_ENTROPY_MIN = 3.5       # DGA 후보 보고 하한 (첫 라벨 셰넌 엔트로피)
 
 # ── 브루트포스/반복형 공격 측정 하한 (판단 기준 아님 — 표본·크기 제한용) ──
-BRUTE_MIN_OPS = 20           # 동일 RPC/인증 op 반복 하한 (Zerologon 은 통상 256+)
+BRUTE_MIN_OPS = 20           # 동일 RPC/인증 op 반복 하한 (자동화 자격증명 공격은 통상 수백 회+)
 BRUTE_MIN_CONNS = 30         # 동일 src→dst:port 새 연결 폭주 하한
 BRUTE_MIN_FAILS = 10         # 인증 실패 버스트 하한
-# netlogon 계열(Zerologon 악용)·원격서비스 등 반복되면 자격증명 공격 신호인 RPC op
+# netlogon 계열·원격서비스 등 반복되면 자격증명 공격 신호인 RPC op
 AUTH_RPC_OPS = {"NetrServerAuthenticate", "NetrServerAuthenticate2",
                 "NetrServerAuthenticate3", "NetrServerReqChallenge",
                 "NetrServerPasswordSet", "NetrServerPasswordSet2",
@@ -328,7 +328,7 @@ def build_lateral_movement(Z, hosts, read_ndjson):
         path, name = d.get("path") or "", d.get("name") or ""
         pu = path.upper()
         admin_share = "ADMIN$" in pu or "C$" in pu   # PE 투하가 일어나는 관리자 공유
-        # 쓰기 액션이거나, 관리자 공유 파일 접근(PsExec 투하는 FILE_OPEN 로만 찍힘) → 팩트로 노출
+        # 쓰기 액션이거나, 관리자 공유 파일 접근(원격 실행 도구의 투하는 FILE_OPEN 로만 찍힘) → 팩트로 노출
         if s in hosts and dst in hosts and s != dst \
            and (any(w in act for w in SMB_WRITE_ACTIONS) or admin_share):
             full = (path + "\\" + name).strip("\\") if name else path
@@ -363,16 +363,16 @@ def build_lateral_movement(Z, hosts, read_ndjson):
 def build_bruteforce(conn, Z, hosts, read_ndjson):
     """반복·속도·인증실패를 '측정만' 한다 (무시그니처 브루트포스/exploit 대비 채널).
 
-    왜: Suricata 시그니처는 단발연결 반복형 공격에서 곧잘 0건이 된다 — Zerologon
-    (CVE-2020-1472)은 매 시도마다 새 TCP 연결 + 캡처 체크섬 문제로 룰이 app-layer 까지
-    못 가 룰셋에 있어도 안 터진다. 그래도 공격은 행동의 '양'으로 드러난다:
+    왜: Suricata 시그니처는 단발연결 반복형 공격에서 곧잘 0건이 된다 — 매 시도마다 새 TCP
+    연결 + 캡처 체크섬 문제로 룰이 app-layer 까지 못 가 룰셋에 있어도 안 터진다. 그래도
+    공격은 행동의 '양'으로 드러난다:
       - rpc_repetition : 동일 DCERPC op 를 (src,dst)로 N회 반복 (netlogon 악용/정찰 폭주)
-      - auth_failures  : kerberos/ntlm 인증 실패 버스트 (password spray/브루트포스)
+      - auth_failures  : kerberos/ntlm 인증 실패 버스트 (브루트포스/인증 반복 시도)
       - conn_rate      : 동일 src→dst:port 로 초당 다수 새 연결 (브루트포스/스캔)
     원칙(기존 anomalies 와 동일): 수치만 계산해 노출 — '공격이냐'는 LLM 이 맥락으로 판단한다.
     하한(_floors)은 표본·크기 제한용이며 판단 기준이 아니다.
     """
-    # 1) 동일 DCERPC op 반복 (Zerologon: 수백 회 NetrServerAuthenticate3)
+    # 1) 동일 DCERPC op 반복 (수백 회 반복되는 인증 op 등)
     ops = defaultdict(Counter)
     for d in read_ndjson(f"{Z}/dce_rpc.log"):
         s, dst, op = d.get("id.orig_h"), d.get("id.resp_h"), d.get("operation")
@@ -424,8 +424,8 @@ def build_bruteforce(conn, Z, hosts, read_ndjson):
                     "fail_min": BRUTE_MIN_FAILS, "list_cap": cap,
                     "note": "counts/rates only — high repetition of an auth op, an "
                             "auth-failure burst, or a high new-connection rate suggests "
-                            "brute force / credential attack / exploit (e.g. Zerologon, "
-                            "password spray). Maliciousness is NOT judged here."},
+                            "brute force / credential attack / exploit. Maliciousness is "
+                            "NOT judged here."},
         "rpc_repetition": rpc_rep[:cap],
         "auth_failures": auth_fail[:cap],
         "conn_rate": conn_rate[:cap],
@@ -442,33 +442,35 @@ def build_bruteforce(conn, Z, hosts, read_ndjson):
 # RPC operation → (공격 단계, 의미, 최소 발생수). smb_writes·버킷과 무관하게 표면화.
 #   ★ 새 실행/정찰 기법 추가는 여기 한 줄 (WMI 사각지대를 이렇게 메운다).
 #   min_count: 이 op 가 '이상'이 되는 하한. netlogon 챌린지/인증·LSA 조회는 정상 AD 에서도
-#   쓰이는 dual-use → 고반복일 때만 공격(count 로 구분, brute_force 와 같은 원리). 실행/
-#   DCSync 는 워크스테이션에서 루틴이 아니므로 1회부터 노출. (정상 AD 오탐 방지)
+#   쓰이는 dual-use → 고반복일 때만 공격(count 로 구분, brute_force 와 같은 원리). 원격
+#   실행·복제 op 는 워크스테이션에서 루틴이 아니므로 1회부터 노출. (정상 AD 오탐 방지)
 OP_MEANING = {
-    "CreateServiceW": ("execution", "svcctl 원격 서비스 생성 (PsExec 계열)", 1),
-    "CreateServiceA": ("execution", "svcctl 원격 서비스 생성 (PsExec 계열)", 1),
-    "CreateServiceWOW64W": ("execution", "svcctl 원격 서비스 생성 (PsExec 계열)", 1),
+    "CreateServiceW": ("execution", "svcctl 원격 서비스 생성 (원격 실행)", 1),
+    "CreateServiceA": ("execution", "svcctl 원격 서비스 생성 (원격 실행)", 1),
+    "CreateServiceWOW64W": ("execution", "svcctl 원격 서비스 생성 (원격 실행)", 1),
     "StartServiceW": ("execution", "svcctl 서비스 시작 (원격 실행)", 1),
     "SchRpcRegister": ("execution", "스케줄드 태스크 등록 (atsvc 원격 실행)", 1),
     "SchRpcRun": ("execution", "스케줄드 태스크 즉시 실행", 1),
     "NetrJobAdd": ("execution", "AT job 등록 (원격 실행)", 1),
-    "ExecMethod": ("execution", "WMI Win32_Process.Create 원격 실행 (wmiexec)", 1),
+    "ExecMethod": ("execution", "WMI Win32_Process.Create 원격 실행", 1),
     "ExecMethodAsync": ("execution", "WMI 비동기 메서드 실행 (원격 실행)", 1),
-    "RemoteCreateInstance": ("execution", "DCOM 원격 객체 생성 (dcomexec/MMC20 등)", 1),
-    "DsGetNCChanges": ("cred_theft", "DRSUAPI 복제 요청 (DCSync — 자격증명 대량 탈취)", 1),
-    "NetrServerPasswordSet2": ("cred_theft", "netlogon 머신 비밀번호 변경 (Zerologon 성공 단계)", 1),
-    "NetrServerReqChallenge": ("cred_attack", "netlogon 챌린지 고반복 (Zerologon 사전단계)", 20),
-    "NetrServerAuthenticate3": ("cred_attack", "netlogon 인증 고반복 (Zerologon 악용 지점)", 20),
-    "NetrServerAuthenticate2": ("cred_attack", "netlogon 인증 고반복 (Zerologon 악용 지점)", 20),
+    "RemoteCreateInstance": ("execution", "DCOM 원격 객체 생성", 1),
+    "DsGetNCChanges": ("cred_theft", "DRSUAPI 복제 요청 (자격증명 대량 탈취)", 1),
+    "NetrServerPasswordSet2": ("cred_theft", "netlogon 머신 비밀번호 변경", 1),
+    "NetrServerReqChallenge": ("cred_attack", "netlogon 챌린지 고반복", 20),
+    "NetrServerAuthenticate3": ("cred_attack", "netlogon 인증 고반복", 20),
+    "NetrServerAuthenticate2": ("cred_attack", "netlogon 인증 고반복", 20),
     "DRSCrackNames": ("recon", "DRSUAPI 이름 변환 대량 (AD 정찰)", 50),
-    "LsarLookupNames3": ("recon", "LSA 이름→SID 대량 조회 (BloodHound 류 정찰)", 50),
+    "LsarLookupNames3": ("recon", "LSA 이름→SID 대량 조회 (AD 정찰)", 50),
     "LsarLookupSids3": ("recon", "LSA SID→이름 대량 조회 (AD 정찰)", 50),
     "SamrEnumerateDomainsInSamServer": ("recon", "SAMR 도메인 열거 (AD 정찰)", 50),
 }
 
 # Zeek weird.log 이름 → (심각도, 의미). Zeek 자체 이상탐지를 버리지 말고 실어 나른다.
+#   주의: 정상 도메인 트래픽에서도 늘 뜨는 라우틴 weird(netlogon_dce_rpc_auth_type 등)는
+#   여기 넣지 않는다 — high 로 올리면 모든 AD 캡처에 가짜 고위험 신호를 심는다(오탐).
+#   매핑 없는 이름은 자동으로 severity=low 로 실린다.
 WEIRD_MEANING = {
-    "netlogon_dce_rpc_auth_type": ("high", "netlogon RPC 인증 타입 이상 (Zerologon 신호)"),
     "HTTP_excessive_pipelining": ("medium", "HTTP 과도 파이프라이닝 (스캔/자동화 정황)"),
     "dns_unmatched_reply": ("low", "DNS 응답 불일치"),
 }
@@ -484,8 +486,8 @@ SIG_CAP = 12
 def build_signals(Z, hosts, read_ndjson):
     """전용함수 없이 '모든 zeek 로그 1회 순회 + 의미 테이블'로 신호를 뽑는다.
 
-      - techniques       : dce_rpc operation 을 OP_MEANING 으로 라벨링(WMI/DCOM/PsExec/
-                           DCSync/Zerologon/정찰). smb_writes·역할버킷과 무관하게 표면화.
+      - techniques       : dce_rpc operation 을 OP_MEANING 으로 라벨링(원격실행/자격증명
+                           탈취/자격증명 공격/정찰). smb_writes·역할버킷과 무관하게 표면화.
       - zeek_weird       : Zeek 가 이미 탐지한 프로토콜 이상(weird.log)을 그대로 전달.
       - protocol_summary : 전용 추출기 없는 나머지 로그(rdp/ssh/ftp/smtp/… + 미래 로그)를
                            제네릭하게 (src,dst,port)→count/first_ts 로 요약 (코드 0줄로 흡수).
@@ -784,7 +786,7 @@ def build_evidence(name, root="/home/qkekdhd/auto_packet_analyze_v3"):
     dc_ip = top_internal_resp(["kerberos.log", "ldap.log", "ldap_search.log"])
     if dc_ip is None:
         # kerberos/ldap 이 없는 캡처(순수 exploit 등) 대비: netlogon/drsuapi RPC 를 가장 많이
-        # 받는 내부 호스트 = DC 후보. (Zerologon pcap 은 kerberos 가 없어 DC 가 role=None 으로
+        # 받는 내부 호스트 = DC 후보. (순수 exploit pcap 은 kerberos 가 없어 DC 가 role=None 으로
         # unclassified 에 파묻히던 문제를 보강 — 공격받는 DC 를 보고서가 식별하게.)
         rpc_dc = Counter()
         for d in read_ndjson(f"{Z}/dce_rpc.log") or []:

@@ -211,16 +211,17 @@ class Tools:
         """Collect signature-less behavioral measurements (beacon jitter, upload
         ratio, no-DNS direct connects, odd ports, role deviation, DNS entropy, and
         brute_force = repetition/rate/auth-failure counts for volumetric attacks
-        like Zerologon / password spray that signatures routinely miss).
+        (credential flooding / auth-repetition) that signatures routinely miss).
         """
 
         return self.evidence.get("anomalies", {})
 
     def get_signals(self):
         """Protocol-agnostic signal layer (no per-log function, no tool-calling):
-        - techniques: RPC ops LABELED via a lookup table (execution=WMI/DCOM/PsExec/
-          schtasks, cred_theft=DCSync, cred_attack=Zerologon, recon=AD enum) —
-          surfaced REGARDLESS of smb_writes or lateral_movement bucket.
+        - techniques: RPC ops LABELED via a lookup table (execution = WMI/DCOM/remote
+          service create/schtasks, cred_theft = directory replication pull, cred_attack
+          = repeated netlogon auth, recon = AD enumeration) — surfaced REGARDLESS of
+          smb_writes or lateral_movement bucket.
         - zeek_weird: Zeek's own protocol-anomaly detections (weird.log).
         - protocol_summary: every other log (rdp/ssh/ftp/smtp/… and future logs)
           auto-summarized as (src,dst,port,count).

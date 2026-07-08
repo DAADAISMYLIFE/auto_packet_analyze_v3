@@ -3,7 +3,7 @@
 # 왜: Zeek 기본 http.log 은 request_body_len(길이 숫자)만 남기고 본문 내용은 버린다.
 #     → URL(URI)엔 안 실리는 공격이 통째로 사라진다:
 #       - POST body 기반 SQLi/XSS/webshell 업로드/command injection
-#       - 헤더 기반 공격 (Log4Shell ${jndi:...}, User-Agent/Referer/X-Forwarded-For SQLi)
+#       - 헤더 기반 공격 (${jndi:...} 인젝션, User-Agent/Referer/X-Forwarded-For SQLi)
 #       - 응답 본문에 드러나는 공격 '성공'의 증거 (SQL 에러/쿼리 반사/유출 데이터)
 #     이 스크립트가 req_body/resp_body/req_headers 컬럼을 추가해 build_evidence 가
 #     읽어 LLM 에 전달한다. 판단은 LLM 몫 — 여기선 팩트만 실어 나른다.

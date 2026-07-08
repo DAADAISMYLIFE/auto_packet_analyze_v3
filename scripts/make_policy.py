@@ -68,7 +68,7 @@ def make_rules(report):
                   if t.get("actor_scope") == "external" and t.get("actor")}
     isolate = {t["actor"] for t in attacks
                if t.get("actor_scope") == "internal" and t.get("actor")}
-    # 침해 확정된 내부 호스트도 격리(공격자든 피격자든 — 예: PsExec 로 서비스가 실행된 타겟).
+    # 침해 확정된 내부 호스트도 격리(공격자든 피격자든 — 예: 원격 서비스가 실행된 타겟).
     # 외부 IP 오분류 방어로 사설대역만.
     isolate |= {v["ip"] for v in (a.get("victims") or [])
                 if v.get("status") == "compromised" and _priv(v.get("ip") or "")}

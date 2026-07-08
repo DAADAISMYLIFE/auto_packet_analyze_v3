@@ -23,7 +23,7 @@ already judged this capture worth analyzing.
   Active Directory authentication. NEVER call this lateral movement on its own.
 - Only describe lateral movement when a compromised host directly attacks ANOTHER
   WORKSTATION over an admin channel (e.g. SMB write to ADMIN$/C$, remote service
-  creation via svcctl, scheduled task via atsvc, DCSync via drsuapi).
+  creation via svcctl, scheduled task via atsvc, directory replication pull via drsuapi).
 - PROBE vs EXECUTION — read the dcerpc_ops in lateral_movement literally:
   `OpenSCManager2` / `ept_map` / share=PIPE with an EMPTY smb_writes list is a
   PROBE or enumeration attempt, NOT successful lateral movement. Escalate to
@@ -34,9 +34,9 @@ already judged this capture worth analyzing.
   hosts independent.
 - VOLUME OVERRIDES the probe rule. The count/rate IS the signal. Check
   `anomalies.brute_force`: if the SAME auth op repeats at high count
-  (`rpc_repetition`, e.g. hundreds of `NetrServerAuthenticate3` — this IS
-  Zerologon / CVE-2020-1472), or there is an auth-failure burst (`auth_failures`,
-  e.g. password spray / Kerberoasting), or a high new-connection rate to one
+  (`rpc_repetition`, e.g. hundreds of `NetrServerAuthenticate3` — an authentication-
+  bypass exploit against the secure channel), or there is an auth-failure burst
+  (`auth_failures`, e.g. credential flooding), or a high new-connection rate to one
   service (`conn_rate`), this is NOT a benign probe and NOT normal AD traffic —
   EVEN toward a DC and EVEN with empty smb_writes. Signatures routinely MISS these
   (single-connection-per-attempt exploits often produce ZERO Suricata alerts), so
@@ -65,16 +65,16 @@ already judged this capture worth analyzing.
   - `uri` / `url` — GET-based attacks and query strings.
   - `req_body` — POST-based attacks live HERE (form-field SQLi, uploaded webshell
     source `<?php`, JSON/command injection). A short/empty uri does NOT mean clean.
-  - `req_headers` — header-based attacks: Log4Shell (`${jndi:ldap://`, `${jndi:dns://`),
-    or SQLi/injection in Referer / X-Forwarded-For / Cookie / custom headers.
+  - `req_headers` — header-based attacks: JNDI/template injection (`${jndi:ldap://`,
+    `${jndi:dns://`), or SQLi/injection in Referer / X-Forwarded-For / Cookie / custom headers.
 - `resp_body` is the SUCCESS signal: an echoed SQL query, a database error string,
   a reflected `<script>`, or leaked rows (usernames/passwords) means the attack
   SUCCEEDED — set that attack's `disposition` to "succeeded", not "attempted".
 - Look for: path traversal (`../`, `/etc/passwd`, `%2e%2e`), SQL injection
   (`UNION SELECT`, `' OR 1=1`, `' OR 'A'='A`), XSS (`<script>`), OS command injection
   (`; nc `, `|bash`, backticks), local/remote file inclusion (`php://`, `=http://`),
-  sensitive-path probing (`/.env`, `/.git/`, `wp-login`, `phpMyAdmin`), Log4Shell
-  (`${jndi:`), webshell upload/use.
+  sensitive-path probing (`/.env`, `/.git/`, `wp-login`, `phpMyAdmin`), JNDI/template
+  injection (`${jndi:`), webshell upload/use.
 - Direction: read src -> dst. The host SENDING the attack is the ATTACKER (actor); the
   host RECEIVING it is the TARGET (victim). The target is NOT a C2 and is NOT an IOC —
   never place it in iocs. Do NOT force attack traffic into the malware-C2 model
@@ -96,8 +96,9 @@ already judged this capture worth analyzing.
   `compromised` in victims. Never model a victim's outbound C2 as the victim "attacking".
 
 # Signal layer (`signals`) — protocol-agnostic; catches what the per-protocol views miss
-The `lateral_movement` bucketing only recognizes SMB/PsExec-shaped attacks. `signals`
-covers the rest via a meaning lookup table, so WMI/DCOM/schtasks/RDP/SSH are not invisible.
+The `lateral_movement` bucketing only recognizes SMB service-creation-shaped attacks.
+`signals` covers the rest via a meaning lookup table, so WMI/DCOM/schtasks/RDP/SSH are
+not invisible.
 - `signals.techniques`: RPC operations LABELED with a category and meaning. This is the
   authoritative execution signal — read it FIRST:
   - `category: "execution"` (WMI ExecMethod, DCOM RemoteCreateInstance, svcctl
@@ -105,10 +106,12 @@ covers the rest via a meaning lookup table, so WMI/DCOM/schtasks/RDP/SSH are not
     Treat it as such REGARDLESS of the lateral_movement bucket and REGARDLESS of empty
     smb_writes — WMI and DCOM never touch SMB, so an empty smb_writes does NOT clear them.
     Mark BOTH src and dst `compromised` and add an `attacks[]` entry (technique from the label).
-  - `category: "cred_theft"` (DsGetNCChanges = DCSync) and `category: "cred_attack"`
-    (Zerologon netlogon) are equally serious — never dismiss as normal AD.
+  - `category: "cred_theft"` (DsGetNCChanges directory replication pull) and
+    `category: "cred_attack"` (repeated netlogon auth) are equally serious — never
+    dismiss as normal AD.
 - `signals.zeek_weird`: Zeek's OWN protocol-anomaly detections. A `high`-severity entry
-  (e.g. netlogon_dce_rpc_auth_type = Zerologon) corroborates an attack — do not ignore.
+  corroborates an attack — do not ignore. (Routine per-session weirds are already
+  filtered out upstream, so what remains is worth reading.)
 - `signals.protocol_summary`: every other protocol present (rdp, ssh, ftp, smtp, …) as
   (src,dst,port,count). Internal→internal RDP/SSH, or outbound FTP/SMTP from a workstation,
   deserves scrutiny even with no signature.
@@ -162,8 +165,8 @@ Return a SINGLE JSON object. Copy every IP / domain / hash EXACTLY from the evid
   otherwise) observed in the evidence:
     - technique: path_traversal / sqli / xss / command_injection / lfi_rfi /
       sensitive_probe / port_scan / brute_force / other
-      (brute_force covers Zerologon / password spray / auth flooding from
-       anomalies.brute_force, not just web login brute force.)
+      (brute_force covers auth-repetition / credential flooding / auth-bypass exploits
+       from anomalies.brute_force, not just web login brute force.)
     - actor: ip that PERFORMED the attack (copied from evidence)
     - target: ip that RECEIVED it (the victim). This is NOT a C2 — do NOT place it in iocs.
     - target_host: hostname/domain of the target, if known
