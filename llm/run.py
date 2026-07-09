@@ -112,6 +112,7 @@ def attach_identity(analysis, tools):
         v["mac"] = h.get("mac")
         v["hostname"] = h.get("hostname")
         v["username"] = h.get("username")
+        v["role"] = h.get("role")            # role 도 코드가 evidence 로 확정(LLM 오라벨 방지)
     if analysis.get("patient_zero"):
         analysis["patient_zero"] = clean_ip(analysis["patient_zero"])
 
@@ -279,16 +280,40 @@ def annotate_attacks(analysis, tools):
     if removed:
         analysis["_removed_attack_targets"] = removed
 
-def create_rules(tools):
-     
-     analyzing_report = "보고서 json 파일 읽기"
-     
-     res = chat(model=MODEL, format="SNORT패턴 만들기",   # ← format이 강제 선택
-            think=True,                              # thinking 끔: content가 바로 JSON, 추론토큰이 예산 안 먹음
-            messages=[{"role": "system", "content": SYSTEM_PROMPT_TRIAGE},
-                        {"role": "user", "content": "뭐시기 저시기\n\n# Analayze\n" + tier1_evidence}],
-            options=OPTS
-            )
+def attach_iocs_from_alerts(analysis, tools):
+    """위협 alert(severity 1)가 가리키는 '외부 관측 IP'를 iocs.c2 에 코드가 보장한다.
+
+    LLM 이 근거·타임라인엔 C2 를 써놓고 정작 iocs.c2 는 비우는 문제(iocs.hashes 와 똑같은
+    실패) 대응 — attach_hashes 와 같은 '코드가 안전 소유' 패턴. 프롬프트로는 gemma 가 계속
+    빼먹으므로(hashes 에서 실증) 코드가 바닥을 보장한다.
+      - severity 1(고신뢰 위협: ET MALWARE/EXPLOIT 등)의 src/dst 중 '외부 관측 IP'만 대상.
+        INFO/저severity(예: MS 연결테스트·CDN)와 내부 victim IP 는 제외.
+      - 이미 어느 버킷(c2/delivery/exfil)에 있으면 건너뛴다. 없으면 c2 에 추가
+        (버킷은 make_policy 가 동일하게 drop 하므로 c2 로 통일해도 무방).
+      - 공유 CDN IP 는 make_policy 의 _is_cdn 이 IP-drop 에서 다시 걸러낸다(이중 안전).
+    ground_iocs/annotate_attacks 뒤(마지막)에 돌려 제거 로직에 다시 안 지워지게 한다.
+    """
+    e = tools.evidence
+    external = {str(x.get("ip")).lower()
+                for x in e.get("external", {}).get("ips", []) if x.get("ip")}
+    threat_ips = set()
+    for a in e.get("alerts", []):
+        if a.get("severity") != 1:                    # 고신뢰 위협만
+            continue
+        for ip in (a.get("src_ips") or []) + (a.get("dst_ips") or []):
+            s = str(ip).lower()
+            if s in external:                         # 외부 관측 IP 만 (내부 호스트 제외)
+                threat_ips.add(s)
+    if not threat_ips:
+        return
+    iocs = analysis.setdefault("iocs", {})
+    for b in ("c2", "delivery", "exfil", "domains", "hashes"):
+        iocs.setdefault(b, [])
+    have = {str(x).lower() for b in ("c2", "delivery", "exfil") for x in iocs.get(b, [])}
+    added = [ip for ip in sorted(threat_ips) if ip not in have]
+    if added:
+        iocs["c2"].extend(added)
+        analysis.setdefault("_iocs_added_from_alerts", []).extend(added)
 
 def main():
     # 1. 매개변수로 어떤 evidence파일인지 입력 받기
@@ -316,6 +341,7 @@ def main():
             attach_hashes(analysis, tools)
             ground_iocs(analysis, tools)       # iocs 오염/환각 제거 (차단정책 안전장치)
             annotate_attacks(analysis, tools)  # attacks scope 채움 + 표적을 iocs 에서 제거
+            attach_iocs_from_alerts(analysis, tools)  # alert 걸린 외부 IP 를 iocs.c2 에 코드가 보장(마지막)
             out["analysis"] = analysis
             print(json.dumps(analysis, ensure_ascii=False, indent=2))
         else:
@@ -329,12 +355,6 @@ def main():
     with open(path, "w", encoding="utf-8") as f:
         json.dump(out, f, ensure_ascii=False, indent=2)
     print(f"[report] 저장됨 → {path}")
-
-    # 5. TODO(다음 단계): reports/<name>.json → Snort 차단 룰 생성.
-    #    LLM chat() 이 아니라 별도 코드 모듈로 — iocs 재전사 오염 방지(합의됨).
-    #    아래 create_rules 스텁은 미사용(format/think 오류 + tier1_evidence 미정의).
-
-    # 6. TODO : 보고서 만들기
 
 if __name__ == "__main__":
     main()
