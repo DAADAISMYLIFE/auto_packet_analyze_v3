@@ -343,3 +343,37 @@ class Tools:
                 if f.get(k):
                     hashes.add(str(f[k]).lower())
         return {"ips": ips, "domains": doms, "hashes": hashes}
+
+
+# ====================== LLM 전송용 무손실 구조 압축 ======================
+# 프롬프트(tier1_evidence) 직렬화 직전에만 쓴다. evidence.json/Tools.evidence 는
+# 키-값 그대로 — ground_iocs/attach_identity/score.py 는 이 함수를 모른다.
+# (Tools 의 tool 이 아니라 코드용 헬퍼 — TOOLS 에 등록하지 않는다.)
+
+TABLE_MIN = 4   # 이 건수 이상의 균일 dict 리스트만 표로 (미만은 키-값 앵커 유지가 SLM 오독 방지에 안전)
+
+def compact_evidence(v):
+    """균일한 dict 리스트를 {columns, rows} 표로 바꿔 키 반복만 걷어낸다 (무손실).
+
+    값(URL/IP/ts/중첩 리스트)은 한 글자도 안 바꾼다 — http 섹션 기준 ~45% 절감.
+    전부 null 인 열은 rows 에서 빼되 empty_columns 로 명시
+    ('봤는데 전부 없음' 신호 보존 — 침묵 삭제 금지 원칙).
+    """
+    if isinstance(v, list) and len(v) >= TABLE_MIN and all(isinstance(x, dict) for x in v):
+        cols = []                               # 등장 순서 보존한 키 합집합
+        for e in v:
+            for k in e:
+                if k not in cols:
+                    cols.append(k)
+        empty = [c for c in cols if all(e.get(c) is None for e in v)]
+        live = [c for c in cols if c not in empty]
+        t = {"_format": "table", "columns": live,
+             "rows": [[e.get(c) for c in live] for e in v]}
+        if empty:
+            t["empty_columns"] = empty
+        return t
+    if isinstance(v, dict):
+        return {k: compact_evidence(x) for k, x in v.items()}
+    if isinstance(v, list):
+        return [compact_evidence(x) for x in v]
+    return v

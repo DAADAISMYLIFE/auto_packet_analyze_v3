@@ -11,6 +11,11 @@
 - mac/hostname/username 은 코드가 채우니 victims 에서 생략해도 된다(잘못 베끼지 마라). role/status 는 네가 채운다.
 - timeline[].event 와 assessment 는 **한글**. 그 안의 값(IP/도메인/해시/uri)과 ts 숫자는 원문 그대로.
 
+# 입력 형식
+tier1 의 큰 배열은 표로 인코딩되어 온다: {"_format":"table","columns":[...],"rows":[[...]]}
+- rows[i][j] 의 의미는 columns[j] 다 — 값은 **열 위치**로 해석하라.
+- empty_columns 는 캡처했지만 전 행이 null 인 필드다 (증거 누락으로 취급 금지).
+
 # 입력 예시 (tier1 evidence — 발췌, 실제 입력은 훨씬 김)
 {"meta":{"duration_s":10400.0},
  "hosts":[{"ip":"192.0.2.50","mac":"00:16:17:a0:b0:c1","hostname":"PC-1","username":"j.doe","role":"workstation","first_ts":1704099650.2},

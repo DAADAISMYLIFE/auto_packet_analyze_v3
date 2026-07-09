@@ -7,6 +7,11 @@
   시그니처 0건이어도 signals.techniques(execution/cred_theft/cred_attack)·anomalies.brute_force·
   공격 패턴(uri/req_body/req_headers) 이 있으면 최소 suspicious.
 
+# 입력 형식
+tier1 의 큰 배열은 표로 인코딩되어 온다: {"_format":"table","columns":[...],"rows":[[...]]}
+- rows[i][j] 의 의미는 columns[j] 다 — 값은 **열 위치**로 해석하라.
+- empty_columns 는 캡처했지만 전 행이 null 인 필드다 (증거 누락으로 취급 금지).
+
 # 입력 예시 1 (tier1 evidence 발췌 — 정상)
 {"meta":{"duration_s":15.0},"alerts":[],"files":[],
  "anomalies":{"exfil_candidates":[{"dst":"203.0.113.7","bytes_out":15200,"bytes_in":600,"ratio":25.3}]},

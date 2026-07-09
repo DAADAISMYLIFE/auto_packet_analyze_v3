@@ -1,6 +1,6 @@
 import sys, json, re, os
 
-from tools import Tools
+from tools import Tools, compact_evidence
 from ollama import chat
 from config import (MODEL, OPTS, VERDICT_SCHEMA, REPORT_SCHEMA,
                     SYSTEM_PROMPT_TRIAGE, SYSTEM_PROMPT_FORENSIC)
@@ -15,7 +15,8 @@ PUBLIC_SUFFIX_FLOOR = {"co.kr", "or.kr", "go.kr", "ne.kr", "pe.kr",
                        "co.uk", "com.br", "com.au", "co.jp", "com.cn"}
 
 def triage(tools):
-    tier1_evidence = json.dumps({
+    # compact_evidence: 무손실 구조 압축(균일 dict 리스트 → 표) — 값 불변, 키 반복만 제거
+    tier1_evidence = json.dumps(compact_evidence({
         "meta": tools.get_meta(),
         "hosts": tools.get_hosts_info(),
         "alerts" : tools.get_alerts(),
@@ -25,7 +26,7 @@ def triage(tools):
         "lateral_movement" : tools.get_lateral_movement(),
         "anomalies" : tools.get_anomalies(),
         "signals" : tools.get_signals()
-    }, ensure_ascii=False, default=str)
+    }), ensure_ascii=False, default=str)
 
     res = chat(model=MODEL, format=VERDICT_SCHEMA,   # ← format이 강제 선택
             think=False,                              # thinking 끔: content가 바로 JSON, 추론토큰이 예산 안 먹음
@@ -52,7 +53,8 @@ def triage(tools):
 
 def forensic(tools):
     # tier1 정보 주입 (claude_llm 검증: tier1 만으로 충분 → tool 루프 없이 단일 호출)
-    tier1_evidence = json.dumps({
+    # compact_evidence: 무손실 구조 압축(균일 dict 리스트 → 표) — 값 불변, 키 반복만 제거
+    tier1_evidence = json.dumps(compact_evidence({
         "meta": tools.get_meta(),
         "hosts": tools.get_hosts_info(),
         "alerts" : tools.get_alerts(),
@@ -62,7 +64,7 @@ def forensic(tools):
         "lateral_movement" : tools.get_lateral_movement(),
         "anomalies" : tools.get_anomalies(),
         "signals" : tools.get_signals()
-    }, ensure_ascii=False, default=str)
+    }), ensure_ascii=False, default=str)
 
     # format 강제 → 마크다운 산문이 아니라 REPORT_SCHEMA JSON 을 그대로 받는다
     res = chat(model=MODEL, format=REPORT_SCHEMA, think=False,
