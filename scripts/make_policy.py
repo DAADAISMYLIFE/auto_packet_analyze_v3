@@ -62,20 +62,35 @@ def make_rules(report):
     a = report.get("analysis") or {}
     iocs = a.get("iocs", {})
     attacks = a.get("attacks") or []
+    victims = a.get("victims") or []
+
+    # 인프라(DC/DNS)는 자동 격리 대상에서 제외 — DC 를 drop any->any 로 끊으면 AD 전체가
+    # 서비스 자폭. 인프라는 '패치·조사' 대상이지 격리 대상이 아니며, 보고서에 compromised 로
+    # 남아 사람이 판단한다(프로젝트 목표: 최종 o/x 는 사람). role 은 run.py 가 evidence 로 확정.
+    role_of = {str(v.get("ip")): v.get("role") for v in victims}
+    def _is_infra(ip):
+        return role_of.get(str(ip)) in ("domain_controller", "dns_server")
 
     block_ips = {ip for b in ("c2", "delivery", "exfil") for ip in iocs.get(b, [])}
     block_ips |= {t["actor"] for t in attacks
                   if t.get("actor_scope") == "external" and t.get("actor")}
     isolate = {t["actor"] for t in attacks
-               if t.get("actor_scope") == "internal" and t.get("actor")}
-    # 침해 확정된 내부 호스트도 격리(공격자든 피격자든 — 예: 원격 서비스가 실행된 타겟).
-    # 외부 IP 오분류 방어로 사설대역만.
-    isolate |= {v["ip"] for v in (a.get("victims") or [])
-                if v.get("status") == "compromised" and _priv(v.get("ip") or "")}
+               if t.get("actor_scope") == "internal" and t.get("actor") and not _is_infra(t["actor"])}
+    # 침해 확정된 내부 호스트도 격리(공격자든 워크스테이션 타겟이든). 외부 IP 오분류 방어로
+    # 사설대역만. 단 인프라(DC/DNS)는 제외 — 위 자폭 방지.
+    isolate |= {v["ip"] for v in victims
+                if v.get("status") == "compromised" and _priv(v.get("ip") or "")
+                and not _is_infra(v.get("ip"))}
+    # 인프라라서 격리에서 뺀 침해 호스트는 침묵하지 않고 사유를 남긴다(사람 검토 유도)
+    infra_skipped = [(str(v.get("ip")), v.get("role")) for v in victims
+                     if v.get("status") == "compromised" and _priv(v.get("ip") or "")
+                     and _is_infra(v.get("ip"))]
     block_ips -= isolate                       # 내부 호스트는 IP차단 아니라 격리 룰로만
     block_doms = set(iocs.get("domains", []))
 
     rules, sid, skipped = [], SID_BASE, []
+    for ip, role in infra_skipped:             # 인프라 격리 제외분 노출 (사람 검토: 패치/조사)
+        skipped.append((f"isolate-infra:{role}(패치/조사대상)", ip))
     cdn_ips = {ip for ip in block_ips if _valid_ip(ip) and _is_cdn(ip)}
     block_ips -= cdn_ips                        # ── 공유 CDN 엣지: IP-drop 제외(부수피해 방지) ──
     for ip in sorted(cdn_ips):                  #    조용히 버리지 않고 사유를 남긴다(도메인룰이 대체)
