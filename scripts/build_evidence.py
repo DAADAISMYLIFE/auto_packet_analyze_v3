@@ -48,6 +48,7 @@ ANOM_LIST_CAP = 15           # 각 목록 최대 길이
 ANOM_ENTROPY_MIN = 3.5       # DGA 후보 보고 하한 (첫 라벨 셰넌 엔트로피)
 
 # ── 브루트포스/반복형 공격 측정 하한 (판단 기준 아님 — 표본·크기 제한용) ──
+DC_FALLBACK_MIN = 5          # kerberos 없는 캡처의 DC 후보 하한 (단발 RPC 로 DC 오라벨 방지)
 BRUTE_MIN_OPS = 20           # 동일 RPC/인증 op 반복 하한 (자동화 자격증명 공격은 통상 수백 회+)
 BRUTE_MIN_CONNS = 30         # 동일 src→dst:port 새 연결 폭주 하한
 BRUTE_MIN_FAILS = 10         # 인증 실패 버스트 하한
@@ -641,19 +642,29 @@ def build_evidence(name, root="/home/qkekdhd/auto_packet_analyze_v3"):
         req_headers = (d.get("req_headers") or "")[:CAP_REQ_HDRS] or None
         if d.get("uid") and d["uid"] not in url_of_uid:
             url_of_uid[d["uid"]] = url
-        # dedup 키에 body 앞부분을 포함 — 같은 URL 이라도 POST 페이로드가 다르면 별개 요청으로
-        # 보존한다(브루트포스/sqlmap 의 서로 다른 시도가 하나로 뭉개지지 않게). 초과분은 _truncation.
-        body_key = (req_body or "")[:120]
-        e = ext_http.setdefault((d.get("method"), host, uri, body_key), {
+        # dedup: (method, host, uri) — 같은 URL 은 한 엔트리로 묶고 count 로 양을 보존한다.
+        #   (body 를 키에 넣으면 sqlmap 류가 엔트리를 폭증시켜 CAP 이 뒤의 서로 다른 공격을 축출함.)
+        e = ext_http.setdefault((d.get("method"), host, uri), {
             "url": url, "method": d.get("method"),
             "dst_ip": d.get("id.resp_h"), "status": None,
             "user_agent": d.get("user_agent"),
-            "req_body": req_body, "resp_body": resp_body, "req_headers": req_headers,
+            "req_body": None, "resp_body": None, "req_headers": None,
             "src_ips": set(), "count": 0, "first_ts": None,
         })
         e["count"] += 1
         if e["status"] is None and d.get("status_code") is not None:
             e["status"] = d["status_code"]
+        # body/헤더는 '내용이 있는' 첫 요청 것으로 채운다 — 재시도(404→200)로 성공 응답이 뒤에
+        #   와도 빈 것에 덮이지 않게(빈 것보다 내용 있는 것 우선). resp_body 채울 땐 그 응답의
+        #   status 로 맞춰 disposition 판단이 어긋나지 않게 한다.
+        if req_body and not e["req_body"]:
+            e["req_body"] = req_body
+        if resp_body and not e["resp_body"]:
+            e["resp_body"] = resp_body
+            if d.get("status_code") is not None:
+                e["status"] = d["status_code"]
+        if req_headers and not e["req_headers"]:
+            e["req_headers"] = req_headers
         if d.get("id.orig_h"):
             e["src_ips"].add(d["id.orig_h"])
         ts = d.get("ts")
@@ -794,7 +805,13 @@ def build_evidence(name, root="/home/qkekdhd/auto_packet_analyze_v3"):
             if rh in hosts and (d.get("operation") in AUTH_RPC_OPS
                                 or d.get("endpoint") in ("netlogon", "drsuapi", "lsarpc")):
                 rpc_dc[rh] += 1
-        dc_ip = rpc_dc.most_common(1)[0][0] if rpc_dc else None
+        # 최소 발생수 하한 — 단발 netlogon/lsarpc 패킷 하나로 워크스테이션이 DC 로 오라벨되어
+        #   make_policy 격리에서 빠지는 것 방지(파일 전반의 volume-floor 원칙과 동일).
+        if rpc_dc:
+            top_ip, top_n = rpc_dc.most_common(1)[0]
+            dc_ip = top_ip if top_n >= DC_FALLBACK_MIN else None
+        else:
+            dc_ip = None
     dns_ip = top_internal_resp(["dns.log"])
     for ip, h in hosts.items():
         if ip == dc_ip:

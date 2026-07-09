@@ -298,19 +298,25 @@ def attach_iocs_from_alerts(analysis, tools):
     e = tools.evidence
     external = {str(x.get("ip")).lower()
                 for x in e.get("external", {}).get("ips", []) if x.get("ip")}
+    # 공격 타겟(피격자)은 IOC 가 아니다 — annotate_attacks 가 iocs 에서 뺀 걸 여기서 다시
+    #   넣으면 '피해자를 C2 로 차단'하는 자폭이 된다. attacks[].target 의 IP 토큰을 뽑아 제외.
+    targets = set()
+    for t in (analysis.get("attacks") or []):
+        m = _IPV4.search(str(t.get("target") or ""))
+        if m:
+            targets.add(m.group(0).lower())
     threat_ips = set()
     for a in e.get("alerts", []):
         if a.get("severity") != 1:                    # 고신뢰 위협만
             continue
         for ip in (a.get("src_ips") or []) + (a.get("dst_ips") or []):
             s = str(ip).lower()
-            if s in external:                         # 외부 관측 IP 만 (내부 호스트 제외)
+            if s in external and s not in targets:    # 외부 관측 IP, 단 공격 피격자는 제외
                 threat_ips.add(s)
     if not threat_ips:
         return
     iocs = analysis.setdefault("iocs", {})
-    for b in ("c2", "delivery", "exfil", "domains", "hashes"):
-        iocs.setdefault(b, [])
+    iocs.setdefault("c2", [])                          # 쓰는 버킷만 보장(나머진 get 으로 읽음)
     have = {str(x).lower() for b in ("c2", "delivery", "exfil") for x in iocs.get(b, [])}
     added = [ip for ip in sorted(threat_ips) if ip not in have]
     if added:

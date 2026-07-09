@@ -67,9 +67,9 @@ def make_rules(report):
     # 인프라(DC/DNS)는 자동 격리 대상에서 제외 — DC 를 drop any->any 로 끊으면 AD 전체가
     # 서비스 자폭. 인프라는 '패치·조사' 대상이지 격리 대상이 아니며, 보고서에 compromised 로
     # 남아 사람이 판단한다(프로젝트 목표: 최종 o/x 는 사람). role 은 run.py 가 evidence 로 확정.
-    role_of = {str(v.get("ip")): v.get("role") for v in victims}
+    role_of = {str(v.get("ip")): v.get("role") for v in victims if v.get("ip")}
     def _is_infra(ip):
-        return role_of.get(str(ip)) in ("domain_controller", "dns_server")
+        return bool(ip) and role_of.get(str(ip)) in ("domain_controller", "dns_server")
 
     block_ips = {ip for b in ("c2", "delivery", "exfil") for ip in iocs.get(b, [])}
     block_ips |= {t["actor"] for t in attacks
