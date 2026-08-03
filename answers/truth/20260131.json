@@ -1,0 +1,21 @@
+{
+  "case": "20260131",
+  "source": "MTA 2026-01-31 공식 answers PDF + evidence 대조 (answers/2026-01-31_answer.txt). Lumma Stealer (whitepepper.su=153.92.1.49) + 후속 .cc 도메인 2개. whooptm.cyou(62.72.32.156)는 공식 PDF 미기재지만 ET MALWARE Lumma Stealer Related Domain 시그니처가 직접 확인. 공식 PDF ANSWERS 절의 10.1.28.58 은 오타(정답 10.1.21.58). communicationfirewall-security.cc 의 DNS 응답 172.67.141.109 는 트래픽 미관측(Cloudflare 라운드로빈)이라 제외.",
+  "verdict": "confirmed",
+  "victims": [
+    {"ip": "10.1.21.58", "hostname": "DESKTOP-ES9F3ML", "username": "gwyatt",
+     "fullname": "Gabriel Wyatt", "mac": "00:21:5d:c8:0e:f2",
+     "malware": ["Lumma Stealer"]}
+  ],
+  "infra_ips": ["10.1.21.2", "10.1.21.1"],
+  "iocs": {
+    "c2": ["153.92.1.49", "62.72.32.156", "80.97.160.24", "104.21.9.36"],
+    "delivery": [],
+    "exfil": [],
+    "domains": ["whitepepper.su", "whooptm.cyou", "holiday-forever.cc",
+                "communicationfirewall-security.cc"],
+    "hashes": []
+  },
+  "benign_hashes": [],
+  "patient_zero": "10.1.21.58"
+}

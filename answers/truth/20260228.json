@@ -1,0 +1,26 @@
+{
+  "case": "20260228",
+  "source": "MTA 2026-02-28 공식 answers PDF + evidence 대조 (answers/2026-02-28_answer.txt). NetSupport Manager RAT (45.131.214.85:443, POST /fakeurl.htm). vadusa.xyz 는 공식 PDF 미기재지만 DNS 가 C2 IP(45.131.214.85)로 직접 해석되어 포함. 감염 경로는 pcap 수집 이전이라 delivery 없음.",
+  "verdict": "confirmed",
+  "victims": [
+    {"ip": "10.2.28.88", "hostname": "DESKTOP-TEYQ2NR", "username": "brolf",
+     "fullname": "Becka Rolf", "mac": "00:19:d1:b2:4d:ad",
+     "malware": ["NetSupport RAT"]}
+  ],
+  "infra_ips": ["10.2.28.2", "10.2.28.1"],
+  "iocs": {
+    "c2": ["45.131.214.85"],
+    "delivery": [],
+    "exfil": [],
+    "domains": ["vadusa.xyz"],
+    "hashes": []
+  },
+  "benign_hashes": [
+    "000ac7dc9366969db9d1e41810a3a27c747a7623535d856eecc2de86cfed80c7",
+    "6dbbf6ec975f97a56ea8ce5c81dab302db6740c89c8ddbf5774728bffaedd238",
+    "fa29a6d5775ff340900a65b39b02fc8b4b77d403c048d8debf22f2f5d09c61a0",
+    "89f43cb3df807293de2772d5f01ac2fc1482b38ccc8fdaee859b80642b7a0487",
+    "a81d1959892ae4180554347df1b97834abba2e1a5e6b9aeba000ecea26eabecc"
+  ],
+  "patient_zero": "10.2.28.88"
+}

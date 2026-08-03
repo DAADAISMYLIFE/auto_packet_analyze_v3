@@ -1,0 +1,32 @@
+{
+  "case": "20250122",
+  "source": "MTA 2025-01-22 공식 answers PDF + Unit42 IOC 대조 (answers/2025-01-22_answer.txt). 가짜 Google Authenticator 사이트 → TeamViewer DLL 사이드로딩 악성코드. 해시 3건은 Unit42 목록과 일치하고 C2(5.252.153.241)가 서빙. TeamViewer 정품 인프라(185.188.32.26, master16.teamviewer.com)는 악용됐지만 차단 IOC 제외.",
+  "verdict": "confirmed",
+  "victims": [
+    {"ip": "10.1.17.215", "hostname": "DESKTOP-L8C5GSJ", "username": "shutchenson",
+     "mac": "00:d0:b7:26:4a:74",
+     "malware": ["TeamViewer DLL sideloading (Unit42 미명명)"]}
+  ],
+  "infra_ips": ["10.1.17.2", "10.1.17.1"],
+  "iocs": {
+    "c2": ["5.252.153.241", "45.125.66.32", "45.125.66.252"],
+    "delivery": ["82.221.136.26"],
+    "exfil": [],
+    "domains": ["authenticatoor.org", "google-authenticator.burleson-appliance.net"],
+    "hashes": [
+      "904280f20d697d876ab90a1b74c0f22a83b859e8b0519cb411fda26f1642f53e",
+      "9634ecaf469149379bba80a745f53d823948c41ce4e347860701cbdff6935192",
+      "3448da03808f24568e6181011f8521c0713ea6160efd05bff20c43b091ff59f7"
+    ]
+  },
+  "benign_hashes": [
+    "585de38d235ae02db9b82f20b88251c2b1dd4cd3b0037a7709640f0c3d20ba9c",
+    "a3a37c49f6defb87760822d31c3f90d9d77d2e9c84d372a45e4e88878cc046da",
+    "779c5187ce3c0ce903fc9786fd3eb94c30fe6d8fc246d9e51367eaf8942c2477",
+    "163ad5eb90b37a667f429f6b92156344687ba6de7ca07a9561d9da6d04b7b325",
+    "d2e1d73ea3632e712db1a6c83641f24c79c8e6f8e07548a139e4499b01b43a67",
+    "3e3466677fbd2cb42ff84577f3aab9d1128c2e90361596363529786f61aa5fab"
+  ],
+  "patient_zero": "10.1.17.215",
+  "precursors": ["google-authenticator.burleson-appliance.net"]
+}
