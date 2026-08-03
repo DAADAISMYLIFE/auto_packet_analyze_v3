@@ -1,0 +1,21 @@
+{
+  "case": "20241126",
+  "source": "MTA 2024-11-26 공식 answers PDF + evidence 대조 (answers/2024-11-26_answer.txt). SmartApeSG(ZPHP) 가짜 브라우저 업데이트(Udate.js) → NetSupport RAT. 페이로드 해시는 pcap 에 없음(파일 추출 불가). classicgrand.com(213.246.109.5)은 침해된 정상 사이트라 c2 가 아닌 precursor.",
+  "verdict": "confirmed",
+  "victims": [
+    {"ip": "10.11.26.183", "hostname": "DESKTOP-B8TQK49", "username": "oboomwald",
+     "fullname": "Oliver Q. Boomwald", "mac": "d0:57:7b:ce:fc:8b",
+     "malware": ["SmartApeSG", "NetSupport RAT"]}
+  ],
+  "infra_ips": ["10.11.26.3", "10.11.26.1"],
+  "iocs": {
+    "c2": ["194.180.191.64"],
+    "delivery": ["193.42.38.139"],
+    "exfil": [],
+    "domains": ["modandcrackedapk.com", "classicgrand.com"],
+    "hashes": []
+  },
+  "benign_hashes": [],
+  "patient_zero": "10.11.26.183",
+  "precursors": ["classicgrand.com"]
+}
