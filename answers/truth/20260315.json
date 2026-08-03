@@ -1,0 +1,32 @@
+{
+  "case": "20260315",
+  "source": "자체 제작(합성) 케이스 — 정답은 scripts/gen_attack_pcap.py 의 설계값(무손실, 순환논리 없음). 인바운드 웹취약점 킬체인: 정찰(Nikto) → SQLi(sqlmap, union 자격증명 덤프) → 경로순회 /etc/passwd → 웹셸 업로드 → RCE(cmd=) → 2차 마이너 다운로드. 상세: answers/2026-03-15_answer.txt.",
+  "verdict": "confirmed",
+  "victims": [
+    {"ip": "10.7.7.10", "hostname": "WEBSRV01", "username": null,
+     "mac": "00:50:56:a1:07:10", "role": "web_server",
+     "malware": ["PHP webshell", "coinminer(2차)"]}
+  ],
+  "infra_ips": ["10.7.7.2", "10.7.7.1"],
+  "iocs": {
+    "c2": ["45.148.10.66"],
+    "delivery": ["185.220.101.42"],
+    "exfil": [],
+    "domains": ["pull.evilcdn-cache.com"],
+    "hashes": [
+      "a489e1d1608667b09b7e157e74170e30081f920c6bd7339bfccb3ccd533fc227",
+      "550602af08acbd78ac40c0b70cf73616cc7e8eaf30e8f5bd8e81a32414e6e8f9"
+    ]
+  },
+  "benign_hashes": [],
+  "patient_zero": "10.7.7.10",
+  "techniques": ["T1595 Active Scanning", "T1190 Exploit Public-Facing App (SQLi)",
+                 "T1083 File/Dir Discovery (LFI /etc/passwd)",
+                 "T1505.003 Web Shell", "T1059 Command Execution",
+                 "T1105 Ingress Tool Transfer (2차 ELF)"],
+  "pipeline_gaps": [
+    "웹서버가 kerberos 사용자 계정이 없어 role=None → make_truth 가 victim 을 자동추출 못하고 infra 로 오분류. 인바운드 서버공격 케이스에서 role 판정 보강 필요.",
+    "인바운드 공격자 IP(45.148.10.66)는 external.ips(아웃바운드 dst 전용)에 없고 alert 로만 잡힘. 유일 신호가 alert 라 시그니처 없는 인바운드 공격은 놓칠 수 있음.",
+    "2차 ELF 마이너(550602af..)를 Zeek 가 mime=None 으로 분류 → make_truth 의 BORING_MIME 이 None 을 포함해 악성 후보에서 드롭. 미분류 실행파일은 오히려 후보로 올려야 함(make_truth --verify 에서 hashes 1/2 로 확인)."
+  ]
+}
