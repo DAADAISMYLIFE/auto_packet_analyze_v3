@@ -30,6 +30,9 @@ import sys
 from collections import Counter, defaultdict
 from datetime import datetime
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from baseline import profile_deviations   # 결정론 편차 프로파일 (정상 대비 랭크)
+
 # ── 캡 (초과 시 _truncation 기록). 현재 pcap 규모선 거의 안 밟힘 ──
 CAP_EXTERNAL_DOMAINS = 500
 CAP_EXTERNAL_IPS = 500
@@ -912,6 +915,9 @@ def build_evidence(name, root="/home/qkekdhd/auto_packet_analyze_v3"):
         "signals": build_signals(Z, hosts, read_ndjson),
         "_truncation": trunc,
     }
+    # 결정론 편차 프로파일 — 정상(baseline) 대비 튀는 것만 랭크. LLM 이 raw 덤프 대신
+    #   여기부터 보게 해서 잘림 방어 + 오탐(MS텔레메트리·광고·AD RPC)을 뿌리에서 강등.
+    evidence["deviations"] = profile_deviations(evidence)
     return evidence
 
 

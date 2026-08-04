@@ -21,6 +21,7 @@ SUSP_TLD = re.compile(r"\.(su|cc|cyou|xyz|top|tk|gq|ml|cf|ga)$")
 def triage(tools):
     # compact_evidence: 무손실 구조 압축(균일 dict 리스트 → 표) — 값 불변, 키 반복만 제거
     tier1_evidence = json.dumps(compact_evidence({
+        "deviations": tools.evidence.get("deviations"),   # ← 정상 대비 편차(코드가 랭크). 여기부터 본다.
         "meta": tools.get_meta(),
         "hosts": tools.get_hosts_info(),
         "alerts" : tools.get_alerts(),
@@ -59,6 +60,7 @@ def forensic(tools):
     # tier1 정보 주입 (claude_llm 검증: tier1 만으로 충분 → tool 루프 없이 단일 호출)
     # compact_evidence: 무손실 구조 압축(균일 dict 리스트 → 표) — 값 불변, 키 반복만 제거
     tier1_evidence = json.dumps(compact_evidence({
+        "deviations": tools.evidence.get("deviations"),   # ← 정상 대비 편차(코드가 랭크). 여기부터 본다.
         "meta": tools.get_meta(),
         "hosts": tools.get_hosts_info(),
         "alerts" : tools.get_alerts(),
@@ -70,12 +72,20 @@ def forensic(tools):
         "signals" : tools.get_signals()
     }), ensure_ascii=False, default=str)
 
-    # format 강제 → 마크다운 산문이 아니라 REPORT_SCHEMA JSON 을 그대로 받는다
+    # deviations 를 먼저 읽으라고 프레이밍 — 코드가 정상(baseline) 대비 튀는 것만 랭크해 둠.
+    #   baseline 강등된 것(MS텔레메트리·광고·정상 AD RPC)은 정상이니 IOC/공격으로 올리지 말 것.
+    #   host_deviations = '공격 후 안 하던 짓 시작' = 침해/성공 판단의 1차 근거.
+    guide = ("먼저 `deviations` 를 봐라: 코드가 정상 대비 '튀는 것'만 랭크했다.\n"
+             "- deviations.top = 사건 후보(점수 높을수록 이상). deviations.host_deviations = "
+             "행동이 바뀐 내부 호스트(= 침해/성공 신호).\n"
+             "- baseline_suppressed / ad_rpc.baseline 로 강등된 것은 정상이다 — IOC·공격으로 "
+             "승격하지 마라(정상 차단 자폭 방지).\n"
+             "- 그 다음 alerts/external/http 등 raw 로 세부를 확인하라.\n\n")
     res = chat(model=MODEL, format=REPORT_SCHEMA, think=False,
                messages=[{"role": "system", "content": SYSTEM_PROMPT_FORENSIC},
                          {"role": "user",
-                          "content": "Analyze this incident and return the structured JSON."
-                                     "\n\n# Tier-1 Evidence\n" + tier1_evidence}],
+                          "content": "Analyze this incident and return the structured JSON.\n\n"
+                                     + guide + "# Tier-1 Evidence\n" + tier1_evidence}],
                options=OPTS)
     try:
         return json.loads(res.message.content)
