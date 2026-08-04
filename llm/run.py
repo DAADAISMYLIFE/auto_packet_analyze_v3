@@ -14,6 +14,10 @@ _DOMAIN = re.compile(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?")
 PUBLIC_SUFFIX_FLOOR = {"co.kr", "or.kr", "go.kr", "ne.kr", "pe.kr",
                        "co.uk", "com.br", "com.au", "co.jp", "com.cn"}
 
+# 정상 서비스가 거의 안 쓰는 최상위도메인 — 악성 후속/DGA 상투. attach_iocs_from_dns 의 승격 게이트.
+# (.ru/.com 등 정상 트래픽 많은 TLD 는 제외 — 오탐 위험. detection 용, 차단은 make_policy 소유.)
+SUSP_TLD = re.compile(r"\.(su|cc|cyou|xyz|top|tk|gq|ml|cf|ga)$")
+
 def triage(tools):
     # compact_evidence: 무손실 구조 압축(균일 dict 리스트 → 표) — 값 불변, 키 반복만 제거
     tier1_evidence = json.dumps(compact_evidence({
@@ -323,6 +327,136 @@ def attach_iocs_from_alerts(analysis, tools):
         iocs["c2"].extend(added)
         analysis.setdefault("_iocs_added_from_alerts", []).extend(added)
 
+def demote_infra_victims(analysis, tools):
+    """인프라(DC/DNS)를 '피해자'로 부르는 자폭 방지 (코드 소유).
+
+    gemma 는 워크스테이션→DC 의 정상 AD RPC(DRSCrackNames/SAMR/LSA)를 credential_theft/
+    recon 으로 오번역하고, 그 표적인 DC 를 status=compromised 로 올린다 → 차단정책이 DC 를
+    격리하면 실제 장애(자폭). DC 가 '인증을 받는 것'은 침해가 아니다.
+      - 단, 진짜 감염된 DC 는 다른 호스트와 같은 잣대로 그대로 compromised 로 둔다:
+        DC 가 sev1 위협 alert 의 '출발지'이거나, 외부로 나가는 alert 의 출발지일 때.
+        정상 AD RPC 는 Suricata alert 를 만들지 않으므로 이 조건은 인바운드 인증과 안 겹친다.
+      - role 은 attach_identity 가 evidence 로 이미 확정했으므로 신뢰한다.
+    """
+    ev = tools.evidence
+    external = {str(x.get("ip")).lower()
+                for x in ev.get("external", {}).get("ips", []) if x.get("ip")}
+
+    def originates_threat(ip):
+        ip = str(ip).lower()
+        for a in ev.get("alerts", []):
+            if ip not in {str(s).lower() for s in (a.get("src_ips") or [])}:
+                continue
+            if a.get("severity") == 1:                       # DC 가 고신뢰 위협의 출발지
+                return True
+            if {str(d).lower() for d in (a.get("dst_ips") or [])} & external:
+                return True                                  # DC 가 외부로 악성 통신
+        return False
+
+    demoted = []
+    for v in analysis.get("victims", []):
+        if v.get("role") in ("domain_controller", "dns_server") \
+                and v.get("status") == "compromised" \
+                and not originates_threat(v.get("ip")):
+            v["status"] = "infrastructure"
+            v["malware"] = []
+            demoted.append(v.get("ip"))
+    if demoted:
+        analysis["_demoted_infra"] = demoted
+
+def attach_iocs_from_dns(analysis, tools):
+    """의심 TLD(.su/.cc/.cyou/.xyz…) 관측 도메인 + 그 IP 를 iocs 에 코드가 보장 (탐지, 코드 소유).
+
+    시그니처 없는 HTTPS-only 후속 C2/배포는 alert 가 안 걸려 attach_iocs_from_alerts 로도
+    못 잡는다(실측: 20260131 의 holiday-forever.cc / communicationfirewall-security.cc).
+    정상 서비스는 이런 TLD 를 거의 안 쓰므로 '의심 TLD + 피해자가 실제 연결한 IP(external.ips)로
+    해석' 게이트만으로 고정밀 승격이 된다.
+      - '탐지'일 뿐 '차단'이 아니다: CDN IP(예: Cloudflare)가 섞여도 make_policy 의 _is_cdn 이
+        IP-drop 에서 걸러 도메인 룰로 돌린다(차단 안전은 enforcement 소유).
+      - alert-IP 조인(도메인이 경보 IP 로 해석되면 악성)은 채택하지 않는다 — MS 연결테스트·
+        Windows Update 가 INFO 경보를 받아 정상 도메인을 오탐(실측)하기 때문.
+      - 내부 자산(호스트/AD 존)·공격표적 IP 는 제외(자폭 방지).
+    ground_iocs/annotate_attacks 뒤에 돌려 제거 로직에 다시 안 지워지게 한다.
+    """
+    ev = tools.evidence
+    iocs = analysis.setdefault("iocs", {})
+    internal = {str(h.get("ip")).lower() for h in ev.get("hosts", []) if h.get("ip")}
+    ad = {str(h.get("ad_domain")).lower() for h in ev.get("hosts", []) if h.get("ad_domain")}
+    ext_ips = {str(x.get("ip")).lower()
+               for x in ev.get("external", {}).get("ips", []) if x.get("ip")}
+    targets = set()
+    for t in (analysis.get("attacks") or []):
+        m = _IPV4.search(str(t.get("target") or ""))
+        if m:
+            targets.add(m.group(0).lower())
+    dom2ip = {}
+    for d in ev.get("external", {}).get("domains", []) or []:
+        q = str(d.get("query") or "").lower()
+        if q:
+            dom2ip[q] = [str(a).lower() for a in (d.get("answers") or []) if _IPV4.fullmatch(str(a))]
+
+    def internal_asset(h):
+        return h in internal or any(h == a or h.endswith("." + a) for a in ad)
+
+    mal = set()
+    for q, ips in dom2ip.items():
+        if internal_asset(q) or not SUSP_TLD.search(q):
+            continue
+        if any(i in ext_ips for i in ips):               # 피해자가 실제 연결한 IP 로 해석
+            mal.add(q)
+    listed = {str(x).lower() for x in iocs.get("domains", [])}
+    add_dom = sorted(d for d in mal if d not in listed)
+    add_ip = set()
+    for d in mal:                                        # 의심-TLD 확정 도메인의 IP 만 (benign 노이즈 배제)
+        for i in dom2ip.get(d, []):
+            if i not in internal and i not in targets:
+                add_ip.add(i)
+    have = {str(x).lower() for b in ("c2", "delivery", "exfil") for x in iocs.get(b, [])}
+    new_ip = sorted(i for i in add_ip if i not in have)
+    iocs.setdefault("c2", [])
+    iocs.setdefault("domains", [])
+    if add_dom:
+        iocs["domains"].extend(add_dom)
+        analysis.setdefault("_iocs_added_from_dns_dom", []).extend(add_dom)
+    if new_ip:
+        iocs["c2"].extend(new_ip)
+        analysis.setdefault("_iocs_added_from_dns_ip", []).extend(new_ip)
+
+def attach_inbound_threat_ips(analysis, tools):
+    """인바운드 공격자 IP 를 iocs.c2 에 보장 (코드 소유). attach_iocs_from_alerts 는 external.ips
+    (아웃바운드 dst 집계)만 봐서, 우리 서버를 때리는 외부 공격자를 놓친다 — 그 IP 는 인바운드라
+    external.ips 에 없고 alert 의 src 로만 등장(실측: 20260315 웹공격의 45.148.10.66).
+      - 방향 게이트: dst 에 내부가 있는 sev1 alert 의 '외부 출발지'만 승격. 아웃바운드 malware
+        C2 는 외부가 dst 라 이 조건에 안 걸려 기존 케이스에 영향 없음(수술적).
+      - 공격표적(피격자)·이미 등록된 IP 는 제외.
+    """
+    ev = tools.evidence
+    internal = {str(h.get("ip")).lower() for h in ev.get("hosts", []) if h.get("ip")}
+    targets = set()
+    for t in (analysis.get("attacks") or []):
+        m = _IPV4.search(str(t.get("target") or ""))
+        if m:
+            targets.add(m.group(0).lower())
+    cand = set()
+    for a in ev.get("alerts", []):
+        if a.get("severity") != 1:
+            continue
+        if not ({str(d).lower() for d in (a.get("dst_ips") or [])} & internal):
+            continue                                     # 인바운드(내부를 향한) alert 만
+        for ip in (a.get("src_ips") or []):
+            s = str(ip).lower()
+            if s and s not in internal and s not in targets and _IPV4.fullmatch(s):
+                cand.add(s)
+    if not cand:
+        return
+    iocs = analysis.setdefault("iocs", {})
+    iocs.setdefault("c2", [])
+    have = {str(x).lower() for b in ("c2", "delivery", "exfil") for x in iocs.get(b, [])}
+    added = [ip for ip in sorted(cand) if ip not in have]
+    if added:
+        iocs["c2"].extend(added)
+        analysis.setdefault("_iocs_added_inbound", []).extend(added)
+
 def main():
     # 1. 매개변수로 어떤 evidence파일인지 입력 받기
     if len(sys.argv) < 2:
@@ -346,10 +480,13 @@ def main():
         analysis = forensic(tools)
         if analysis:
             attach_identity(analysis, tools)
+            demote_infra_victims(analysis, tools)  # 인프라(DC/DNS)를 피해자로 오인 → 격리 자폭 방지
             attach_hashes(analysis, tools)
             ground_iocs(analysis, tools)       # iocs 오염/환각 제거 (차단정책 안전장치)
             annotate_attacks(analysis, tools)  # attacks scope 채움 + 표적을 iocs 에서 제거
-            attach_iocs_from_alerts(analysis, tools)  # alert 걸린 외부 IP 를 iocs.c2 에 코드가 보장(마지막)
+            attach_iocs_from_alerts(analysis, tools)  # alert 걸린 외부 IP 를 iocs.c2 에 코드가 보장
+            attach_iocs_from_dns(analysis, tools)     # 의심 TLD 도메인+IP 승격 (HTTPS-only 후속 C2)
+            attach_inbound_threat_ips(analysis, tools)  # 인바운드 공격자 IP 보장 (마지막 — 제거로직 뒤)
             out["analysis"] = analysis
             print(json.dumps(analysis, ensure_ascii=False, indent=2))
         else:
