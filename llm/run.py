@@ -18,6 +18,14 @@ PUBLIC_SUFFIX_FLOOR = {"co.kr", "or.kr", "go.kr", "ne.kr", "pe.kr",
 # (.ru/.com 등 정상 트래픽 많은 TLD 는 제외 — 오탐 위험. detection 용, 차단은 make_policy 소유.)
 SUSP_TLD = re.compile(r"\.(su|cc|cyou|xyz|top|tk|gq|ml|cf|ga)$")
 
+# IOC 승격 게이트: 위협 '카테고리' 시그니처만 승격한다. 숫자 severity 는 못 믿는다 —
+#   ET CHAT Skype / ET FILE_SHARING Dropbox 가 sev1 이라, severity==1 게이트는 c2 를
+#   Dropbox/Skype/Facebook 로 오염시킨다(q2 에서 실증). baseline.py 의 _CAT_THREAT 와 동일.
+_THREAT_SIG = re.compile(
+    r"\b(MALWARE|TROJAN|CNC|COINMINER|EXPLOIT|ATTACK_RESPONSE|WEB_SERVER|"
+    r"WEB_SPECIFIC_APPS|CURRENT_EVENTS|SCAN|PHISHING|WORM|ROOTKIT|DOS|"
+    r"SHELLCODE|MOBILE_MALWARE|REMOTE_ACCESS)\b", re.I)
+
 def triage(tools):
     # compact_evidence: 무손실 구조 압축(균일 dict 리스트 → 표) — 값 불변, 키 반복만 제거
     tier1_evidence = json.dumps(compact_evidence({
@@ -321,7 +329,7 @@ def attach_iocs_from_alerts(analysis, tools):
             targets.add(m.group(0).lower())
     threat_ips = set()
     for a in e.get("alerts", []):
-        if a.get("severity") != 1:                    # 고신뢰 위협만
+        if not _THREAT_SIG.search(a.get("signature") or ""):   # 위협 카테고리만(숫자 severity 불신)
             continue
         for ip in (a.get("src_ips") or []) + (a.get("dst_ips") or []):
             s = str(ip).lower()
@@ -449,7 +457,7 @@ def attach_inbound_threat_ips(analysis, tools):
             targets.add(m.group(0).lower())
     cand = set()
     for a in ev.get("alerts", []):
-        if a.get("severity") != 1:
+        if not _THREAT_SIG.search(a.get("signature") or ""):   # 위협 카테고리만(Dropbox/Skype sev1 제외)
             continue
         if not ({str(d).lower() for d in (a.get("dst_ips") or [])} & internal):
             continue                                     # 인바운드(내부를 향한) alert 만
