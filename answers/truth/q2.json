@@ -1,0 +1,21 @@
+{
+  "case": "q2",
+  "source": "자체 포렌식 라벨링 (공식 답안 없음 — netresec 훈련용 실캡처, 2015-04). evidence 근거로 작성. 두 갈래 침해: (1) 웹서버 192.168.0.2 가 Shellshock(CVE-2014-6271) 다중출처 공격 대상(802건 + curl/wget/lwp 명령주입) — RCE 시도, (2) 워크스테이션 192.168.0.53(password-ned-xp)에 Poweliks 클릭사기 CnC + pwned.se DNS 터널 백도어(호스트명이 서브도메인에 인코딩) + Wajam 광고웨어. 광고/트래커 대량(adnxs/pubmatic 등)은 노이즈(baseline). 이 케이스의 핵심 테스트: 파이프라인이 초기 Shellshock뿐 아니라 '이후 성공한 침해'(pwned.se 터널·Poweliks)를 잡는가.",
+  "verdict": "confirmed",
+  "victims": [
+    {"ip": "192.168.0.53", "hostname": "password-ned-xp", "username": null,
+     "malware": ["Poweliks", "DNS tunnel backdoor (pwned.se)", "Wajam adware"]},
+    {"ip": "192.168.0.2", "hostname": null, "username": null,
+     "malware": ["Shellshock 공격 대상 (CVE-2014-6271, RCE 시도)"]}
+  ],
+  "infra_ips": ["192.168.0.1"],
+  "iocs": {
+    "c2": ["88.214.241.199", "146.52.78.242", "60.250.33.201", "66.135.38.206"],
+    "delivery": [],
+    "exfil": [],
+    "domains": ["pwned.se", "yjuggczkkq.gq", "technologieduluth.com", "wajam.com"],
+    "hashes": []
+  },
+  "benign_hashes": [],
+  "patient_zero": ""
+}

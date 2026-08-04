@@ -174,28 +174,52 @@ def profile_deviations(ev, top_k=25):
             devs.append({"dest": dest, "kind": kind, "score": 0.5,
                          "reasons": ["미분류 외부(위협신호 없음)"]})
 
-    seen = set()
-    for dom, ips in dom_answers.items():
-        if dom in internal or dom in seen:
-            continue
-        seen.add(dom)
-        hard, soft, why = 0, 0, []
-        if SUSP_TLD.search(dom):
-            hard += 2; why.append("suspicious-TLD")
-        if _parent(dom) in tunnels:
-            hard += 4; why.append(f"dns-tunnel(*.{_parent(dom)} {len(tunnels[_parent(dom)])}개)")
-        bh, bs, bwhy = 0, 0, []
-        for ip in ips:
-            h, s, w = ip_signals(ip)
-            if h + s > bh + bs:
-                bh, bs, bwhy = h, s, w
-        hard += bh; soft += bs; why += bwhy
-        emit(dom, "domain", hard, soft, why, _known_normal_dom(dom))
+    # 부모(등록도메인)별로 묶는다 — DNS터널/DGA 는 서브도메인이 top 을 도배하지 않게 부모 1개로 접음.
+    by_parent = {}
+    for dom in dom_answers:
+        if dom not in internal:
+            by_parent.setdefault(_parent(dom), []).append(dom)
+
+    emitted_ips = set()
+
+    def best_ip_sig(doms):
+        bh, bs, bw = 0, 0, []
+        for dm in doms:
+            for ip in dom_answers.get(dm, []):
+                emitted_ips.add(ip)
+                h, s, w = ip_signals(ip)
+                if h + s > bh + bs:
+                    bh, bs, bw = h, s, w
+        return bh, bs, bw
+
+    for par, members in by_parent.items():
+        susp = [m for m in members if SUSP_TLD.search(m)]
+        collapse = (par in tunnels) or (len(members) >= 3 and len(susp) >= 3)
+        if collapse:                       # 터널/DGA 부모 1개로 접기(서브도메인 도배 방지)
+            hard = 4 if par in tunnels else 2
+            why = [(f"dns-tunnel(*.{par})" if par in tunnels else f"suspicious-TLD 다수(*.{par})"),
+                   f"{len(members)}개 서브도메인"]
+            bh, bs, bw = best_ip_sig(members)
+            emit(par, "domain", hard + bh, bs, why + bw, False)
+        else:
+            for dom in members:
+                hard, why = (2, ["suspicious-TLD"]) if SUSP_TLD.search(dom) else (0, [])
+                bh, bs, bw = best_ip_sig([dom])
+                emit(dom, "domain", hard + bh, bs, why + bw, _known_normal_dom(dom))
 
     for x in ext.get("ips", []) or []:
         ip = str(x.get("ip") or "").lower()
-        if not ip or ip in internal or ip in answer_ips:
+        if not ip or ip in internal or ip in answer_ips or ip in emitted_ips:
             continue
+        emitted_ips.add(ip)
+        h, s, w = ip_signals(ip)
+        emit(ip, "ip", h, s, w, _is_normal_ip(ip))
+
+    # 위협-카테고리 alert 가 걸렸는데 external.ips 에 없던 IP(인바운드 공격자·캡에서 드롭된 C2)도 표면화.
+    for ip in ip_hard:
+        if ip in internal or ip in answer_ips or ip in emitted_ips:
+            continue
+        emitted_ips.add(ip)
         h, s, w = ip_signals(ip)
         emit(ip, "ip", h, s, w, _is_normal_ip(ip))
 
