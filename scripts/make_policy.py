@@ -18,6 +18,8 @@
 """
 import sys, os, json, re, subprocess, ipaddress
 
+from domain_utils import is_public_suffix
+
 SID_BASE = 1000000
 _IPV4 = re.compile(r"^(?:\d{1,3}\.){3}\d{1,3}$")
 _DOM = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9-]+)*\.[a-z]{2,}$", re.I)
@@ -72,6 +74,7 @@ def make_rules(report):
         return bool(ip) and role_of.get(str(ip)) in ("domain_controller", "dns_server")
 
     block_ips = {ip for b in ("c2", "delivery", "exfil") for ip in iocs.get(b, [])}
+    block_ips |= set(a.get("attackers") or [])
     block_ips |= {t["actor"] for t in attacks
                   if t.get("actor_scope") == "external" and t.get("actor")}
     isolate = {t["actor"] for t in attacks
@@ -104,13 +107,14 @@ def make_rules(report):
                      f'sid:{sid}; rev:1;)'); sid += 1
     for dom in sorted(block_doms):             # ── 도메인: DNS 조회 + TLS SNI 둘 다 ──
         d = str(dom).lower()
-        if not _DOM.match(d):
+        if not _DOM.match(d) or is_public_suffix(d):
             skipped.append(("domain", dom)); continue
+        pat = re.escape(d)
         rules.append(f'drop dns $HOME_NET any -> any any '
-                     f'(msg:"[AUTO] BLOCK dns {d}"; dns.query; content:"{d}"; nocase; '
+                     f'(msg:"[AUTO] BLOCK dns {d}"; dns.query; pcre:"/(?:^|\\.){pat}$/i"; '
                      f'sid:{sid}; rev:1;)'); sid += 1
         rules.append(f'drop tls $HOME_NET any -> any any '
-                     f'(msg:"[AUTO] BLOCK sni {d}"; tls.sni; content:"{d}"; nocase; '
+                     f'(msg:"[AUTO] BLOCK sni {d}"; tls.sni; pcre:"/(?:^|\\.){pat}$/i"; '
                      f'sid:{sid}; rev:1;)'); sid += 1
     for host in sorted(isolate):               # ── 내부 침해 발판: 호스트 격리 ──
         if not _valid_ip(host):
@@ -389,6 +393,7 @@ def main():
             evidence = json.load(f)
         iocs = (report.get("analysis") or {}).get("iocs", {})
         b_ips = {ip for k in ("c2", "delivery", "exfil") for ip in iocs.get(k, [])}
+        b_ips |= set((report.get("analysis") or {}).get("attackers") or [])
         s2 = content_rules(evidence, block_ips=b_ips, block_doms=set(iocs.get("domains", [])))
 
     out = os.path.join(ROOT, "reports", f"{name}.rules")

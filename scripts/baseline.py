@@ -27,17 +27,19 @@ import re
 import sys
 import ipaddress
 
+from domain_utils import matches_any_domain, registrable_domain
+
 # ── 큐레이트된 known-normal 도메인(부분일치). soft 신호만 억제(hard 는 그대로 뜬다). ──
 KNOWN_NORMAL_DOM = (
     "microsoft.com", "windows.com", "windowsupdate.com", "msftconnecttest.com",
-    "msftncsi.com", "msft", "office.com", "office.net", "live.com", "msn.com",
-    "bing.com", "azure", "azureedge.net", "windows.net", "msedge.net",
-    "skype.com", "teams", "microsoftapp.net", "wns.windows.com",
+    "msftncsi.com", "office.com", "office.net", "live.com", "msn.com",
+    "bing.com", "azure.com", "azure.net", "azureedge.net", "windows.net", "msedge.net",
+    "skype.com", "teams.microsoft.com", "microsoftapp.net", "wns.windows.com",
     "google.com", "googleapis.com", "gstatic.com", "gvt1.com", "youtube.com",
     "google-analytics.com", "doubleclick.net", "googlesyndication.com",
-    "client-channel.google.com", "apple.com", "icloud.com", "mozilla.",
+    "client-channel.google.com", "apple.com", "icloud.com", "mozilla.org",
     "digicert.com", "verisign.com", "globalsign.com", "letsencrypt.org",
-    "sectigo.com", "akamai", "akadns.net", "cloudflare.com", "fastly.net",
+    "sectigo.com", "akamai.net", "akamaiedge.net", "akamaized.net", "akadns.net", "cloudflare.com", "fastly.net",
     "dropbox.com", "facebook.com", "fbcdn.net", "clarity.ms", "adobe.com",
     "ubuntu.com", "debian.org", "cloudfront.net", "office365.com",
     # 광고/트래커 — 조용하면 노이즈(soft, 강등), MALWARE 로 악용되면(hard) 표면화
@@ -83,13 +85,11 @@ def _is_normal_ip(ip):
 
 
 def _known_normal_dom(d):
-    d = d.lower()
-    return any(k in d for k in KNOWN_NORMAL_DOM)
+    return matches_any_domain(d, KNOWN_NORMAL_DOM)
 
 
 def _parent(d):
-    parts = d.lower().strip(".").split(".")
-    return ".".join(parts[-2:]) if len(parts) >= 2 else d.lower()
+    return registrable_domain(d)
 
 
 def _dns_tunnel_parents(ev):

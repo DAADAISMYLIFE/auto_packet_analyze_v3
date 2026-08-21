@@ -1,24 +1,5 @@
 #!/usr/bin/env python3
-"""
-채점 — run.py 가 뽑은 reports/<case>.json 을 정답(truth)과 비교해 숫자로 낸다.
-
-입력은 JSON 만. (run.py 는 이미 REPORT_SCHEMA JSON 을 뱉으므로 산문 파싱 없음.)
-
-지표
-  verdict : truth.verdict 일치?
-  ground  : 보고서 IOC 가 전부 evidence.json 안에 있나 (환각/오염 탐지, 정답 불필요)
-  victimR : truth 피해자 IP recall
-  infra!  : truth.infra_ips 를 status=compromised 로 부른 건수 (0이어야 정상; #1)
-  hashR   : truth 해시 recall (#6)
-  iocR    : truth C2/delivery/exfil IP recall
-  domR    : truth 도메인 recall (suffix 매칭)
-  pz      : patient_zero 일치
-
-사용법
-  python scripts/score.py reports                    # 디렉터리 전체
-  python scripts/score.py reports/20210616.json      # 파일 하나
-  python scripts/score.py --compare reports_a reports_b
-"""
+"""보고서 평가: recall뿐 아니라 precision/F1, 의미 bucket, 오탐을 함께 측정한다."""
 import argparse
 import json
 import os
@@ -26,9 +7,7 @@ import re
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-IP_RE = re.compile(r"(?:\d{1,3}\.){3}\d{1,3}")
-HASH_RE = re.compile(r"[0-9a-fA-F]{64}|[0-9a-fA-F]{32}")
-DOMAIN_RE = re.compile(r"(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}", re.I)
+IP_RE = re.compile(r"^(?:\d{1,3}\.){3}\d{1,3}$")
 
 
 def case_of(path):
@@ -37,209 +16,225 @@ def case_of(path):
     return digits[:8] if len(digits) >= 8 else stem
 
 
-def norm_set(xs):
-    return {str(x).strip().lower() for x in xs if x is not None and str(x).strip()}
+def norm_set(values):
+    return {str(x).strip().lower() for x in values or [] if x is not None and str(x).strip()}
 
 
-# ─────────────────────────── evidence (grounding) ───────────────────────────
+def domain_match(a, b):
+    a, b = str(a).lower(), str(b).lower()
+    return a == b or a.endswith("." + b) or b.endswith("." + a)
+
+
 def evidence_iocs(case, output_dir):
-    """output/<case>/evidence.json 의 '관측된 IOC' 집합 (grounding 기준).
-
-    전체 트리 정규식 walk 는 내부호스트·유저명·파일명까지 grounded 로 오인하므로
-    build_evidence 가 만든 구조화 필드만 읽는다:
-      external.ips[].ip + domains[].answers  →  관측된 IP
-      external.domains[].query + sni[].sni    →  관측된 도메인/SNI
-      files[].sha256 / .md5                    →  관측된 파일 해시
-    """
     path = os.path.join(output_dir, case, "evidence.json")
     if not os.path.exists(path):
         return None
-    with open(path, encoding="utf-8") as f:
-        ev = json.load(f)
-    ext = ev.get("external", {}) or {}
-    ips, doms, hashes = set(), set(), set()
-    for x in ext.get("ips", []) or []:
-        if x.get("ip"):
-            ips.add(str(x["ip"]).lower())
-    for d in ext.get("domains", []) or []:
-        if d.get("query"):
-            doms.add(str(d["query"]).lower())
-        for a in (d.get("answers") or []):
-            if a:
-                ips.add(str(a).lower())
-    for s in ext.get("sni", []) or []:
-        if s.get("sni"):
-            doms.add(str(s["sni"]).lower())
-    for frec in ev.get("files", []) or []:
-        for k in ("sha256", "md5"):
-            if frec.get(k):
-                hashes.add(str(frec[k]).lower())
-    return {"ips": ips, "domains": doms, "hashes": hashes}
+    with open(path, encoding="utf-8") as handle:
+        ev = json.load(handle)
+    ext = ev.get("external") or {}
+    internal = {str(h.get("ip")).lower() for h in ev.get("hosts", []) if h.get("ip")}
+    ips, domains, hashes = set(), set(), set()
+    for row in ext.get("ips", []) or []:
+        if row.get("ip"):
+            ips.add(str(row["ip"]).lower())
+    for row in ext.get("domains", []) or []:
+        if row.get("query"):
+            domains.add(str(row["query"]).lower())
+        for answer in row.get("answers", []) or []:
+            if IP_RE.fullmatch(str(answer)):
+                ips.add(str(answer).lower())
+    for row in ext.get("sni", []) or []:
+        if row.get("sni"):
+            domains.add(str(row["sni"]).lower())
+    # 인바운드 공격자는 external.ips(아웃바운드 집계)에 없고 alert에만 존재할 수 있다.
+    for alert in ev.get("alerts", []) or []:
+        for ip in (alert.get("src_ips") or []) + (alert.get("dst_ips") or []):
+            value = str(ip).lower()
+            if value not in internal and IP_RE.fullmatch(value):
+                ips.add(value)
+    for row in ev.get("files", []) or []:
+        for key in ("sha256", "md5"):
+            if row.get(key):
+                hashes.add(str(row[key]).lower())
+    return {"ips": ips, "domains": domains, "hashes": hashes}
 
 
-# ─────────────────────────── report → atoms ───────────────────────────
 def load_atoms(path):
-    with open(path, encoding="utf-8") as f:
-        rep = json.load(f)
-    a = rep.get("analysis") or {}
-    victim_status = {(v.get("ip") or "").strip().lower(): (v.get("status") or "").lower()
-                     for v in a.get("victims", []) if v.get("ip")}
-    iocs = a.get("iocs", {})
+    with open(path, encoding="utf-8") as handle:
+        report = json.load(handle)
+    analysis = report.get("analysis") or {}
+    statuses = {str(v.get("ip")).strip().lower(): str(v.get("status") or "").lower()
+                for v in analysis.get("victims", []) if v.get("ip")}
+    iocs = analysis.get("iocs") or {}
+    buckets = {key: norm_set(iocs.get(key, [])) for key in
+               ("c2", "delivery", "exfil", "domains", "hashes")}
+    attackers = norm_set(analysis.get("attackers", []))
     return {
-        "verdict": rep.get("verdict"),
-        "victim_status": victim_status,
-        "victims": {ip for ip, st in victim_status.items() if st == "compromised"},
-        "ioc_ips": norm_set(iocs.get("c2", []) + iocs.get("delivery", []) + iocs.get("exfil", [])),
-        "domains": norm_set(iocs.get("domains", [])),
-        "hashes": norm_set(iocs.get("hashes", [])),
-        "patient_zero": (a.get("patient_zero") or "").strip().lower() or None,
+        "verdict": report.get("verdict"), "victim_status": statuses,
+        "victims": {ip for ip, status in statuses.items() if status == "compromised"},
+        "buckets": buckets, "attackers": attackers,
+        "ioc_ips": buckets["c2"] | buckets["delivery"] | buckets["exfil"] | attackers,
+        "domains": buckets["domains"], "hashes": buckets["hashes"],
+        "patient_zero": str(analysis.get("patient_zero") or "").strip().lower() or None,
+        "techniques": norm_set(a.get("technique") for a in analysis.get("attacks", [])),
+        "dispositions": {str(a.get("id") or f"{a.get('actor')}->{a.get('target')}:{a.get('technique')}"):
+                         a.get("disposition") for a in analysis.get("attacks", [])},
+        "run": report.get("_run") or {},
     }
 
 
-# ─────────────────────────── scoring ───────────────────────────
-def _recall(found, truth):
-    truth = norm_set(truth)
-    if not truth:
-        return None
-    return len({t for t in truth if t in found}) / len(truth)
+def prf(found, truth, matcher=None):
+    found, truth = set(found), set(truth)
+    if matcher:
+        tp_truth = {t for t in truth if any(matcher(f, t) for f in found)}
+        tp_found = {f for f in found if any(matcher(f, t) for t in truth)}
+        tp_for_p, tp_for_r = len(tp_found), len(tp_truth)
+    else:
+        tp_for_p = tp_for_r = len(found & truth)
+    precision = tp_for_p / len(found) if found else (1.0 if not truth else 0.0)
+    recall = tp_for_r / len(truth) if truth else 1.0
+    f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
+    return {"precision": precision, "recall": recall, "f1": f1,
+            "fp": sorted(found - truth) if not matcher else
+                  sorted(f for f in found if not any(matcher(f, t) for t in truth)),
+            "fn": sorted(truth - found) if not matcher else
+                  sorted(t for t in truth if not any(matcher(f, t) for f in found))}
 
 
-def _domain_recall(found, truth):
-    truth = norm_set(truth)
-    if not truth:
-        return None
-    hit = sum(1 for t in truth
-              if any(d == t or d.endswith("." + t) or t.endswith("." + d) for d in found))
-    return hit / len(truth)
+def score(atoms, truth, observed):
+    truth_victims = norm_set(v.get("ip") for v in truth.get("victims", []))
+    ti = truth.get("iocs") or {}
+    truth_buckets = {key: norm_set(ti.get(key, [])) for key in
+                     ("c2", "delivery", "exfil", "domains", "hashes")}
+    truth_ioc_ips = truth_buckets["c2"] | truth_buckets["delivery"] | truth_buckets["exfil"]
+    # 기존 truth가 인바운드 공격자를 c2에 넣은 경우도 aggregate 탐지 성능에서는 인정하되,
+    # 새 truth의 attackers 필드가 생기면 별도 의미 지표로 평가한다.
+    truth_attackers = norm_set(truth.get("attackers", []))
+    truth_ioc_all = truth_ioc_ips | truth_attackers
 
-
-def _ungrounded_domains(found, ev):
-    return [d for d in found
-            if not any(d == e or d.endswith("." + e) or e.endswith("." + d) for e in ev)]
-
-
-def score(atoms, truth, ev):
-    r = {"verdict": atoms["verdict"],
-         "verdict_ok": atoms["verdict"] == truth.get("verdict")}
-
-    r["victimR"] = _recall(atoms["victims"], [v["ip"] for v in truth.get("victims", [])])
+    result = {
+        "verdict": atoms["verdict"], "verdict_ok": atoms["verdict"] == truth.get("verdict"),
+        "victim": prf(atoms["victims"], truth_victims),
+        "ioc_ip": prf(atoms["ioc_ips"], truth_ioc_all),
+        "domain": prf(atoms["domains"], truth_buckets["domains"], domain_match),
+        "hash": prf(atoms["hashes"], truth_buckets["hashes"]),
+        "bucket": {}, "run": atoms["run"],
+    }
+    for key in ("c2", "delivery", "exfil"):
+        result["bucket"][key] = prf(atoms["buckets"][key], truth_buckets[key])
+    if "attackers" in truth:
+        result["bucket"]["attackers"] = prf(atoms["attackers"], truth_attackers)
 
     infra = norm_set(truth.get("infra_ips", []))
-    r["infra_bad"] = sorted(ip for ip, st in atoms["victim_status"].items()
-                            if ip in infra and st == "compromised")
+    result["infra_bad"] = sorted(ip for ip, status in atoms["victim_status"].items()
+                                 if ip in infra and status == "compromised")
+    result["unexpected_compromised"] = sorted(atoms["victims"] - truth_victims)
+    explicit_benign = norm_set(truth.get("benign_ips", [])) | norm_set(truth.get("benign_hashes", []))
+    result["explicit_benign_fp"] = sorted((atoms["ioc_ips"] | atoms["hashes"]) & explicit_benign)
 
-    ti = truth.get("iocs", {})
-    r["iocR"] = _recall(atoms["ioc_ips"], ti.get("c2", []) + ti.get("delivery", []) + ti.get("exfil", []))
-    r["domR"] = _domain_recall(atoms["domains"], ti.get("domains", []))
-    r["hashR"] = _recall(atoms["hashes"], ti.get("hashes", []))
-
-    if ev is not None:
-        r["ground_bad_ips"] = sorted(ip for ip in atoms["ioc_ips"] if ip not in ev["ips"])
-        r["ground_bad_hash"] = sorted(h for h in atoms["hashes"] if h not in ev["hashes"])
-        r["ground_bad_dom"] = _ungrounded_domains(atoms["domains"], ev["domains"])
-        r["ground_ok"] = not (r["ground_bad_ips"] or r["ground_bad_hash"] or r["ground_bad_dom"])
+    if observed is None:
+        result["ground_ok"], result["ungrounded"] = None, []
     else:
-        r["ground_ok"], r["ground_bad_ips"], r["ground_bad_hash"], r["ground_bad_dom"] = None, [], [], []
+        bad = ([f"ip:{x}" for x in atoms["ioc_ips"] if x not in observed["ips"]] +
+               [f"hash:{x}" for x in atoms["hashes"] if x not in observed["hashes"]] +
+               [f"domain:{x}" for x in atoms["domains"]
+                if not any(domain_match(x, e) for e in observed["domains"])])
+        result["ungrounded"] = sorted(bad)
+        result["ground_ok"] = not bad
 
-    # false-positive: 보고서가 '정상인데 악성으로 올린' IOC (truth.benign_*)
-    #   grounding·recall 로는 안 잡힘 — WU 업데이트 해시를 iocs 에 넣는 오탐을 여기서 잡는다
-    benign_h = norm_set(truth.get("benign_hashes", []))
-    benign_i = norm_set(truth.get("benign_ips", []))
-    r["fp"] = (sorted(h for h in atoms["hashes"] if h in benign_h)
-               + sorted(ip for ip in atoms["ioc_ips"] if ip in benign_i))
+    patient_zero = truth.get("patient_zero")
+    result["patient_zero_ok"] = (atoms["patient_zero"] == str(patient_zero).lower()) \
+        if patient_zero else None
 
-    pz = truth.get("patient_zero")
-    r["pz_ok"] = (atoms["patient_zero"] == str(pz).lower()) if pz else None
-    return r
+    truth_techniques = norm_set(truth.get("techniques", []))
+    if truth_techniques:
+        def technique_match(found, expected):
+            a = re.sub(r"[^a-z0-9]+", " ", found.lower())
+            b = re.sub(r"[^a-z0-9]+", " ", expected.lower())
+            tokens = {x for x in a.split() if len(x) >= 4}
+            return bool(tokens & {x for x in b.split() if len(x) >= 4})
+        result["technique"] = prf(atoms["techniques"], truth_techniques, technique_match)
+    else:
+        result["technique"] = None
+    return result
 
 
-# ─────────────────────────── driver ───────────────────────────
 def score_file(path, truth_dir, output_dir):
-    key = case_of(path)                                       # truth 키 (8자리 날짜 또는 stem)
-    stem = os.path.splitext(os.path.basename(path))[0]        # evidence 디렉터리명 (= pcap stem)
-    tpath = os.path.join(truth_dir, key + ".json")
-    if not os.path.exists(tpath):
+    key, stem = case_of(path), os.path.splitext(os.path.basename(path))[0]
+    truth_path = os.path.join(truth_dir, key + ".json")
+    if not os.path.exists(truth_path):
         return key, None
-    with open(tpath, encoding="utf-8") as f:
-        truth = json.load(f)
-    # evidence 디렉터리는 stem 우선, 없으면 8자리 키로 폴백 (로컬/Kaggle 명명 차이 흡수)
-    ev = evidence_iocs(stem, output_dir) or evidence_iocs(key, output_dir)
-    return key, score(load_atoms(path), truth, ev)
+    with open(truth_path, encoding="utf-8") as handle:
+        truth = json.load(handle)
+    observed = evidence_iocs(stem, output_dir) or evidence_iocs(key, output_dir)
+    return key, score(load_atoms(path), truth, observed)
 
 
-def _f(x):
-    return "  - " if x is None else f"{x:.2f}"
+def collect(path, truth_dir, output_dir):
+    files = sorted(os.path.join(path, f) for f in os.listdir(path) if f.endswith(".json")) \
+        if os.path.isdir(path) else [path]
+    return [score_file(item, truth_dir, output_dir) for item in files]
+
+
+def _pct(value):
+    return f"{value:.2f}"
 
 
 def print_rows(rows, label):
     print(f"\n=== {label} ===")
-    hdr = f"{'case':<10} {'verdict':<14} {'grd':<4} {'vR':<5} {'infra!':<7} {'hashR':<6} {'fp':<4} {'iocR':<5} {'domR':<5} {'pz':<3}"
-    print(hdr); print("-" * len(hdr))
-    agg = {}
-    for case, r in rows:
-        if r is None:
-            print(f"{case:<10} (truth 없음 — 스킵)"); continue
-        vok = "OK" if r["verdict_ok"] else "XX"
-        grd = "-" if r["ground_ok"] is None else ("ok" if r["ground_ok"] else "BAD")
-        infra = "ok" if not r["infra_bad"] else f"FAIL{len(r['infra_bad'])}"
-        fp = "ok" if not r["fp"] else f"FP{len(r['fp'])}"
-        pz = "-" if r["pz_ok"] is None else ("OK" if r["pz_ok"] else "XX")
-        print(f"{case:<10} {(str(r['verdict'])+'/'+vok):<14} {grd:<4} {_f(r['victimR']):<5} "
-              f"{infra:<7} {_f(r['hashR']):<6} {fp:<4} {_f(r['iocR']):<5} {_f(r['domR']):<5} {pz:<3}")
-        for k in ("victimR", "iocR", "domR", "hashR"):
-            if r[k] is not None:
-                agg.setdefault(k, []).append(r[k])
-        agg.setdefault("verdict", []).append(1 if r["verdict_ok"] else 0)
-        agg.setdefault("infra_fail", []).append(1 if r["infra_bad"] else 0)
-        agg.setdefault("fp_total", []).append(len(r["fp"]))
-        if r["ground_ok"] is not None:
-            agg.setdefault("ground_fail", []).append(0 if r["ground_ok"] else 1)
-    if agg:
-        m = lambda k: sum(agg[k]) / len(agg[k]) if agg.get(k) else float("nan")
-        print("-" * len(hdr))
-        print(f"{'AGG':<10} verdict={m('verdict'):.2f}  victimR={m('victimR'):.2f}  iocR={m('iocR'):.2f}  "
-              f"domR={m('domR'):.2f}  hashR={m('hashR'):.2f}  "
-              f"infra_fail={sum(agg.get('infra_fail', []))}  ground_fail={sum(agg.get('ground_fail', []))}  "
-              f"fp_total={sum(agg.get('fp_total', []))}")
-    for case, r in rows:
-        if r and (r["ground_bad_ips"] or r["ground_bad_hash"] or r["ground_bad_dom"] or r["infra_bad"] or r["fp"]):
-            det = []
-            if r["ground_bad_ips"]:  det.append(f"환각IP={r['ground_bad_ips']}")
-            if r["ground_bad_hash"]: det.append(f"환각HASH={len(r['ground_bad_hash'])}")
-            if r["ground_bad_dom"]:  det.append(f"환각도메인={r['ground_bad_dom']}")
-            if r["infra_bad"]:       det.append(f"infra피해자오인={r['infra_bad']}")
-            if r["fp"]:              det.append(f"오탐(정상을악성으로)={[x[:10] for x in r['fp']]}")
-            print(f"  ! {case}: {'  '.join(det)}")
-
-
-def collect(path, truth_dir, output_dir):
-    if os.path.isdir(path):
-        files = sorted(os.path.join(path, f) for f in os.listdir(path) if f.endswith(".json"))
-    else:
-        files = [path]
-    return [score_file(fp, truth_dir, output_dir) for fp in files]
+    print(f"{'case':<12} {'verdict':<14} {'vF1':<5} {'iF1':<5} {'dF1':<5} {'hF1':<5} {'ground':<7} {'FP':<4} {'pz':<3}")
+    valid = []
+    for case, result in rows:
+        if result is None:
+            print(f"{case:<12} truth 없음")
+            continue
+        valid.append(result)
+        fp = (len(result["victim"]["fp"]) + len(result["ioc_ip"]["fp"]) +
+              len(result["domain"]["fp"]) + len(result["hash"]["fp"]) +
+              len(result["explicit_benign_fp"]))
+        ground = "-" if result["ground_ok"] is None else ("ok" if result["ground_ok"] else "BAD")
+        pz = "-" if result["patient_zero_ok"] is None else ("OK" if result["patient_zero_ok"] else "XX")
+        verdict = f"{result['verdict']}/" + ("OK" if result["verdict_ok"] else "XX")
+        print(f"{case:<12} {verdict:<14} {_pct(result['victim']['f1']):<5} "
+              f"{_pct(result['ioc_ip']['f1']):<5} {_pct(result['domain']['f1']):<5} "
+              f"{_pct(result['hash']['f1']):<5} {ground:<7} {fp:<4} {pz:<3}")
+        if fp or result["infra_bad"] or result["ungrounded"]:
+            print(f"  ! victimFP={result['victim']['fp']} iocFP={result['ioc_ip']['fp']} "
+                  f"domainFP={result['domain']['fp']} infra={result['infra_bad']} "
+                  f"ungrounded={result['ungrounded']}")
+    if valid:
+        mean = lambda expr: sum(expr(r) for r in valid) / len(valid)
+        print("-" * 76)
+        print(f"macro verdict={mean(lambda r: float(r['verdict_ok'])):.2f} "
+              f"victimF1={mean(lambda r: r['victim']['f1']):.2f} "
+              f"iocF1={mean(lambda r: r['ioc_ip']['f1']):.2f} "
+              f"domainF1={mean(lambda r: r['domain']['f1']):.2f} "
+              f"hashF1={mean(lambda r: r['hash']['f1']):.2f}")
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("target", nargs="?", help="reports 파일 또는 디렉터리")
-    ap.add_argument("--compare", nargs=2, metavar=("A", "B"))
-    ap.add_argument("--truth", default=os.path.join(ROOT, "answers", "truth"))
-    ap.add_argument("--output", default=os.path.join(ROOT, "output"))
-    args = ap.parse_args()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("target", nargs="?", help="reports 파일 또는 디렉터리")
+    parser.add_argument("--compare", nargs=2, metavar=("A", "B"))
+    parser.add_argument("--truth", default=os.path.join(ROOT, "answers", "truth"))
+    parser.add_argument("--output", default=os.path.join(ROOT, "output"))
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args()
 
-    def resolve(d):
-        return d if os.path.isabs(d) else os.path.join(ROOT, d)
+    def resolve(value):
+        return value if os.path.isabs(value) else os.path.join(ROOT, value)
 
-    if args.compare:
-        for d in args.compare:
-            dd = resolve(d)
-            print_rows(collect(dd, args.truth, args.output), os.path.basename(dd.rstrip("/")))
-    elif args.target:
-        t = resolve(args.target)
-        print_rows(collect(t, args.truth, args.output), os.path.basename(t.rstrip("/")))
+    groups = [(path, collect(resolve(path), args.truth, args.output)) for path in args.compare] \
+        if args.compare else ([(args.target, collect(resolve(args.target), args.truth, args.output))]
+                              if args.target else [])
+    if not groups:
+        parser.print_help()
+        raise SystemExit(1)
+    if args.json:
+        print(json.dumps({label: dict(rows) for label, rows in groups}, ensure_ascii=False, indent=2))
     else:
-        ap.print_help(); sys.exit(1)
+        for label, rows in groups:
+            print_rows(rows, os.path.basename(label.rstrip("/")))
 
 
 if __name__ == "__main__":

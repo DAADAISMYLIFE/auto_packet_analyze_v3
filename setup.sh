@@ -29,7 +29,7 @@ if [ "$(id -u)" -eq 0 ]; then SUDO=""; else SUDO="sudo"; fi
 log "0/5  apt 갱신"
 $SUDO apt-get update -y
 $SUDO apt-get install -y curl gnupg ca-certificates lsb-release software-properties-common
-$SUDO apt-get install -y zstd
+$SUDO apt-get install -y zstd python3-venv
 
 # -----------------------------------------------------------------------------
 # 1) Suricata + 룰
@@ -126,13 +126,12 @@ fi
 # 5) test.py 실행
 # -----------------------------------------------------------------------------
 log "5/5  llm/test.py 실행 (응답 확인)"
-# venv 의 ollama 파이썬 패키지를 사용
-if [ -x "$VENV/bin/python" ]; then
-  PY="$VENV/bin/python"
-else
-  PY="python3"
-  "$PY" -m pip install --quiet ollama || warn "ollama 파이썬 패키지 설치 실패"
+# 프로젝트 전용 venv + 버전 범위가 기록된 requirements 사용
+if [ ! -x "$VENV/bin/python" ]; then
+  python3 -m venv "$VENV"
 fi
+PY="$VENV/bin/python"
+"$PY" -m pip install --quiet -r "$ROOT/requirements.txt" || warn "Python 의존성 설치 실패"
 
 "$PY" "$ROOT/llm/test.py"
 

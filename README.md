@@ -1,235 +1,188 @@
 # auto_packet_analyze_v3
 
-pcap 하나를 넣으면 **자동으로 네트워크 포렌식 분석 → 차단 정책(Suricata 룰) → 한글 보고서**까지 만들고,
-사람은 마지막에 **보고서를 읽고 차단 적용 여부(o/x)만** 고른다. 핵심 목표는 **인간 개입의 최소화**.
+PCAP을 Suricata/Zeek로 처리하고, **결정론적 사건 사실(case facts) → 제한된 LLM 판단 →
+Suricata 정책 → 한글 보고서**를 생성하는 로컬 네트워크 포렌식 파이프라인이다.
+사람은 마지막에 근거와 정책을 확인하고 적용 여부만 선택한다.
 
-Suricata/Zeek 로 pcap에서 로그를 뽑고, 로컬 LLM(Ollama)이 그 로그만 근거로 피해자·공격자·공격행위·타임라인을
-판단한다. **외부 위협인텔은 안 쓴다** — pcap + 시그니처 + 행동만으로 얼마나 정확한가가 이 프로젝트의 평가 기준.
+## 핵심 원칙
 
----
+### 코드는 사실과 안전을 소유한다
 
-## 전체 파이프라인
+패킷에 이미 있는 IP·도메인·해시·호스트·방향·시간을 LLM에게 다시 받아 적게 하지 않는다.
+`llm/case_facts.py`가 evidence를 다음과 같이 결정론적으로 변환한다.
 
-```
+- 내부/외부 scope와 통신 방향
+- 위협 경보와 HTTP 공격 패턴
+- 감염 후 행동이 있는 호스트와 단순 피격 호스트의 구분
+- 외부 공격자와 C2/delivery/exfil의 의미 분리
+- 관측값별 confidence, evidence ref, 정책 적격성
+- 보수적 verdict, patient zero, 타임라인
+
+결과는 `output/<case>/case_facts.json`에 저장된다. LLM이 없어도 기존 소비 계약과 호환되는
+`reports/<case>.json`이 생성된다.
+
+### LLM은 제한된 판단만 한다
+
+LLM 입력은 raw evidence 전체가 아니라 기본 48,000자 예산의 작은 case-facts packet이다.
+모델은 코드가 발급한 `obs:*`, `attack:*` ID 안에서만 다음을 보강한다.
+
+- 시그니처가 뒷받침하는 멀웨어 family 명칭
+- 고신뢰 후보의 의미 bucket
+- 코드가 `unknown`으로 남긴 공격 disposition
+- 한글 요약과 커버리지 한계
+
+후보 밖 값, 존재하지 않는 evidence ref, host/attack ID는 검증에서 거부한다. 실패한 경우 전체
+분석을 무한 반복하지 않고 오류를 첨부해 기본 1회만 복구 요청한다. 복구도 실패하면 결정론적
+보고서를 그대로 사용한다. 패킷의 URI/body/header/hostname 문자열은 명시적으로 비신뢰 데이터로
+취급하며 지시문으로 해석하지 않는다.
+
+### 탐지와 차단은 다르다
+
+모든 관측 후보는 `analysis.observables`에 남지만, 다음 조건을 만족한 값만 `analysis.iocs` 또는
+`analysis.attackers`로 승격되어 정책 입력이 된다.
+
+- 코드가 실제 관측값과 provenance를 확인
+- confidence가 `high`
+- 코드가 `policy_eligible=true`로 판정
+
+LLM은 `policy_eligible`을 올릴 수 없다. 해시는 보고서 IOC로 쓸 수 있지만 Suricata 정책 생성기는
+해시 차단을 하지 않는다. 외부 공격자는 `attackers`에 별도 보관하되 정책에서는 차단한다.
+
+## 파이프라인
+
+```text
 pcap
- │  scripts/extract_log.sh            (Suricata + Zeek)
- ▼
-output/<name>/{suricata/eve.json, zeek/*.log}
- │  scripts/build_evidence.py         (정규화·압축, 결정론적, 판단 없음)
- ▼
-output/<name>/evidence.json           ← "tier1 근거 번들"
- │  llm/run.py                        (LLM 분석 + 코드 안전가드)
- ▼
-reports/<name>.json                   ← 분석 결과(구조화 JSON)
- │  scripts/make_policy.py            (코드, chat 없음)
- ▼
-reports/<name>.rules                  ← Suricata 차단 룰
- │  llm/render_report.py              (코드가 표 주입 + LLM 서술 1콜)
- ▼
-reports/<name>.md                     ← 최종 한글 보고서 → 사람이 [ o / x ]
+  │ scripts/extract_log.sh
+  ▼
+Suricata eve.json + Zeek NDJSON
+  │ scripts/build_evidence.py
+  ▼
+evidence.json
+  │ llm/case_facts.py (결정론적)
+  ▼
+case_facts.json ───────────────┐
+  │ llm/run.py                 │ LLM 실패 시에도 진행
+  ▼                            │
+reports/<case>.json ◀──────────┘
+  │ scripts/make_policy.py
+  ▼
+reports/<case>.rules
+  │ llm/render_report.py
+  ▼
+reports/<case>.md → [ o / x ]
 ```
 
-Kaggle에서는 `kaggle/run_pipeline.ipynb` 가 위 전 과정을 pcap마다 자동으로 돈다.
+## Evidence 예산
 
----
+`build_evidence.py`는 단순 시간순 선착순으로 cap을 채우지 않는다. 다음 자료를 먼저 보존하고,
+선택된 결과는 다시 시간순으로 정렬한다.
 
-## 핵심 설계 원칙: **"코드가 팩트, LLM이 판단"**
+- alert-linked IP/도메인
+- 공격 payload가 있는 HTTP 요청
+- 의심 TLD
+- 위협 카테고리 alert
 
-LLM(특히 로컬 26~27B)은 IP/도메인/해시를 **베끼다 손상**시키거나(`65.6_35.141`), **누락**하거나, 없는 걸 **지어낸다**.
-그래서 **정답이 하나뿐이고 evidence에 존재하는 값은 전부 코드가 채우고**, LLM은 **열린 판단**(사건이냐 아니냐,
-어느 멀웨어냐, 이게 유출이냐)과 **서술**만 맡는다.
-
-| 코드가 소유 (팩트) | LLM이 소유 (판단) |
-|---|---|
-| mac / hostname / username (evidence 조인) | verdict (사건/무혐의) |
-| iocs.hashes (파일에서 추출 + 업데이트인프라 오탐 제외) | 멀웨어 패밀리 attribution (시그니처 기반) |
-| IOC 그라운딩 (evidence 관측집합 대조, 오염·환각 제거) | 유출 판단 (맥락 기반) |
-| 내부 자산 / 공격 표적 차단 제외 (자폭 방지) | 타임라인 시나리오, 개요·권고 서술 |
-| 차단 룰 생성 (make_policy) | |
-
-또 하나: **차단 룰은 절대 LLM(chat)으로 안 만든다.** 이미 정제된 IOC를 LLM에 다시 주면 재오염되므로,
-`make_policy.py`가 **순수 코드로** iocs를 룰 템플릿에 끼워넣는다.
-
-> ⚠️ **참고**: 분석 경로는 tool-calling을 **안 쓴다.** Ollama에서 `format=`(JSON 스키마 강제)와 `tools=`가
-> 공존 불가라, tier1 근거를 메시지에 **직접 주입 + `format=REPORT_SCHEMA` 로 JSON 강제**하는 구조다.
-> (`tools.py`의 함수들은 "tool"이 아니라 evidence를 읽어주는 **코드 API**다.)
-
----
-
-## 디렉터리 구조
-
-```
-setup.sh                     # suricata/zeek/ollama 설치 + 모델 pull
-.env                         # MODEL / NUM_CTX / TEMPERATURE / SEED (설정 단일 소스)
-scripts/
-  run_suricata.sh            # pcap → suricata eve.json
-  run_zeek.sh                # pcap → zeek NDJSON (네이티브 없으면 docker zeek 폴백)
-  extract_log.sh <pcap>      # 위 둘을 한번에 → output/<name>/{suricata,zeek}
-  build_evidence.py <name>   # 로그 → output/<name>/evidence.json (tier1 번들)
-  make_policy.py <name>      # reports/<name>.json → reports/<name>.rules (Suricata)
-llm/
-  config.py                  # .env 로더 + REPORT/VERDICT 스키마 + 프롬프트 로드
-  tools.py                   # Tools 클래스: evidence.json 을 읽어주는 코드 API
-  run.py                     # 분석 단계: triage → forensic → 코드 안전가드 → reports/<name>.json
-  render_report.py           # reports/<name>.json + .rules → reports/<name>.md (한글)
-  prompts/
-    triage.md                # triage 시스템 프롬프트
-    forensic.md              # forensic 시스템 프롬프트
-  test.py                    # tool-calling 스모크(레거시, 분석 경로 미사용)
-kaggle/
-  run_pipeline.ipynb         # Kaggle 러너 (전 단계 자동)
-output/    (gitignore)       # pcap별 로그 + evidence.json
-reports/   (gitignore)       # 분석 json + .rules + .md (생성물)
-```
-
----
-
-## 단계별 상세
-
-### 1) 로그 추출 — `scripts/extract_log.sh <pcap>`
-`run_suricata.sh`(→ `eve.json`) + `run_zeek.sh`(→ conn/dns/http/dce_rpc/smb/kerberos/... NDJSON)를 한 번에.
-zeek는 네이티브가 없으면 **docker `zeek/zeek:latest`** 로 폴백. 출력: `output/<name>/{suricata,zeek}`.
-
-### 2) 근거 번들 — `scripts/build_evidence.py <name>`
-로그를 **결정론적으로** 정규화·압축해 `evidence.json` 하나로. **판단(휴리스틱)은 여기서 안 한다.** 주요 필드:
-- `meta` (capture 창, duration, flow 수) · `hosts` (ip/mac/hostname/username/role/ad_domain, first/last_ts)
-- `alerts` (Suricata 시그니처, severity, count, src/dst) · `external` (`ips`/`domains`/`sni`/**`http`**)
-- `files` (해시·mime, 서빙 uid 조인) · `lateral_movement` (dst 역할별 dcerpc_ops/smb_writes)
-- `anomalies` (무시그니처 행동: 비콘 지터, 업로드 비율, no-DNS 직결, odd-port, 역할이탈, DNS 엔트로피)
-
-핵심: **http 요청 URI를 evidence로 올린다** — path traversal/웹공격은 시그니처가 없어도 URI에 드러나므로.
-
-### 3) 분석 — `llm/run.py <name>` (아래 "run.py 상세" 참조)
-`reports/<name>.json` 저장. 룰생성(`make_policy`)·보고서(`render_report`)의 공통 입력.
-
-### 4) 차단 정책 — `scripts/make_policy.py <name> [--validate]`
-**순수 코드.** `reports/<name>.json`의 iocs를 Suricata 룰로:
-- `c2/delivery/exfil` + 외부 공격자 → `drop ip $HOME_NET -> <ip>`
-- `domains` → `drop dns`(dns.query) + `drop tls`(tls.sni)
-- 내부 공격자(actor_scope=internal) → `drop ip <host> -> any` (호스트 격리)
-- 표적(피격자)·내부 자산은 이미 상류에서 iocs에서 빠져 있어 **자기 서버 자폭 안 함**
-- `--validate` 면 `suricata -T` 로 문법 검증. sid 는 `1000000+`. (해시 룰은 보류)
-
-### 5) 최종 보고서 — `llm/render_report.py <name>`
-`reports/<name>.md`(한글). **코드가 사실 표를 주입**(피해자/IOC/타임라인/룰), **LLM은 서술만**(개요/시나리오/권고,
-`format`강제 1콜). ollama 없으면 서술을 스텁 처리(로컬에서 표/룰 검증 가능). 끝에 **`[ o / x ]`** — 사람의 유일한 결정점.
-
----
-
-## `llm/run.py` 상세 — 분석 단계 (네가 처음 짠 것, 많이 바뀜)
-
-`main()` 흐름: `triage → (사건이면) forensic → 코드 가드 5개 → 저장`.
-
-| 함수 | 역할 | 소유 |
-|---|---|---|
-| **`triage(tools)`** | 1차 판정 `no_incident`/`suspicious`/`confirmed`. tier1 근거 주입 + `format=VERDICT_SCHEMA` 단일 chat. `no_incident`면 분석 안 감(무혐의를 사건으로 프레이밍하는 것 차단). | LLM |
-| **`forensic(tools)`** | 본 분석. `format=REPORT_SCHEMA` 단일 chat → victims/iocs/timeline/patient_zero/anomaly_analysis/attacks 등 구조화 JSON. | LLM |
-| **`attach_identity(analysis, tools)`** | victims 의 `mac/hostname/username` 을 evidence 조인으로 **코드가 확정**(LLM 베끼기 손상·누락 교정). `clean_ip`가 구분자 손상 IP(`10.6_15.187`) 를 숫자 재조립+호스트 검증으로 복구, `patient_zero`도 IP만 정규화. | 코드 |
-| **`attach_hashes(analysis, tools)`** | `iocs.hashes` 를 evidence `files[]` 에서 코드가 채움(LLM 해시 블라인드니스 방지). windowsupdate 등 **업데이트 인프라가 서빙한 x-dosexec 은 오탐이라 제외**(`_excluded_benign_hashes`). | 코드 |
-| **`ground_iocs(analysis, tools)`** | iocs 의 IP/도메인을 **evidence 관측집합과 대조** — 없으면 오염/환각으로 제거. `host_of`가 LLM 장식(`"1.2.3.4 (Beacon)"`)·URL·JSON누출에서 알맹이만 추출, 버킷 오배치 도메인 salvage, **내부 자산(호스트 IP·AD 존)·TLD·공용접미사 기각**. 제거분 `_rejected_iocs`. | 코드 |
-| **`annotate_attacks(analysis, tools)`** | `attacks[]` 의 `actor_scope`/`target_scope`(내부/외부)를 호스트 인벤토리로 채움 → 차단 반응 분기(내부 actor=호스트격리 / 외부=IP차단 / 표적=차단안함). 표적(피격자)을 iocs 에서 제거(자폭 방지). `_removed_attack_targets`. | 코드 |
-| **`attach_iocs_from_alerts(analysis, tools)`** | (가드 5개 중 마지막) severity 1 alert 가 가리키는 외부 관측 IP 를 `iocs.c2` 에 코드가 보장(LLM 이 근거엔 C2 써놓고 iocs 는 비우는 문제 대응). 공격 표적 IP 는 제외. ⚠️ 이 룰셋에선 ET INFO/CHAT/FILE_SHARING(Dropbox·Skype 등)도 severity 1 이라 정상 CDN 이 c2 에 들어감 — make_policy `_is_cdn` 이 Cloudflare/Fastly 대역만 되거르고 Dropbox/Google 등은 못 거른다("알려진 한계" 2·CDN 참조). | 코드 |
-
-> 왜 가드가 이렇게 많나: 로컬 SLM이 팩트를 계속 망쳐서, **매 실패 지점을 코드로 하나씩 받아낸** 결과.
-> 그래서 모델을 바꿔도(gemma↔qwen) 팩트는 안 흔들리고 **판단 품질 차이만 드러난다.**
-
----
-
-## `llm/tools.py` 상세 — evidence 읽어주는 코드 API
-
-`Tools(name)` 은 `output/<name>/evidence.json` 을 로드. 크게 두 종류:
-
-**(A) tier1 근거 getter — run.py 가 LLM 메시지에 주입하는 것들**
-| 메서드 | 반환 |
-|---|---|
-| `get_meta()` | capture 창/duration/flow 수 (짧은 캡처면 비콘 휴리스틱 불신용) |
-| `get_hosts_info()` | 전 호스트 ip/mac/hostname/username/role/ad_domain + 활동창 |
-| `get_alerts()` | Suricata 알럿 전량(시그니처/severity/count/src/dst) |
-| `get_external()` | **알럿에 엮인** 외부 ip/도메인 + sni (배경 CDN/텔레메트리 노이즈 제거) |
-| `get_http()` | 웹 요청 전량(method/url/uri/status/UA) — **무필터**(웹공격은 alert 없어도 URI에 있음) |
-| `get_files()` | 멀웨어 후보 파일(실행/압축/스크립트)은 전문, 나머지는 mime별 요약 |
-| `get_lateral_movement()` | 내부↔내부: dst 역할별 dcerpc_ops/smb_shares/smb_writes (정찰 vs 실행 구분 재료) |
-| `get_anomalies()` | 무시그니처 행동 측정치(비콘/업로드비율/no-dns/odd-port/역할이탈/DNS엔트로피) |
-| `get_signals()` | RPC 기법 라벨·zeek weird·프로토콜 요약·존재 로그 목록 |
-
-> ⚠️ **`get_external()` 필터 한계**: "알럿에 엮인 IP만 통과" 규칙은 `ET INFO`/`ET CHAT`/`FILE_SHARING`
-> (Dropbox·Skype·"PE EXE download") 같은 양성-정보 알럿이 참조하는 IP도 통과시킨다 → 정상 CDN이 C2 후보로 올라간다.
-> 반대로 알럿이 없는 IOC(DGA 도메인, 애드웨어)는 `background_domains` 로 빠진다.
-> 고침 방향: 알럿 카테고리/severity 게이팅(`ET MALWARE`/`TROJAN`/`EXPLOIT` 만 IP 승격). → "알려진 한계" 참조.
-
-**(B) 코드 전용 헬퍼 — 가드가 쓰는 것들 (LLM 미노출)**
-| 메서드 | 용도 |
-|---|---|
-| `malware_candidate_hashes()` | 멀웨어 해시를 서빙호스트로 악성/정상 분리 (attach_hashes) |
-| `serving_host_for_hash(sha)` | files→http uid 조인으로 그 해시를 서빙한 호스트 |
-| `observed_iocs()` | 그라운딩 기준집합 = evidence의 **"외부 관측" IP/도메인/해시**. 내부 자산(호스트IP·AD존·내부전용 해석 이름)은 **원천 제외** (ground_iocs 가 이걸로 대조) |
-
-`get_host_info`/`get_alerts_by_severity`/`search_external` 은 단건 조회용(레거시 tool 스모크, 분석 경로 미사용).
-
----
-
-## `llm/config.py` — 설정 단일 소스
-리포 루트 `.env` 를 읽어 노출: `MODEL`, `NUM_CTX`, `OPTS`(temperature/seed/num_ctx), `VERDICT_SCHEMA`,
-`REPORT_SCHEMA`(둘 다 ollama `format` 강제용), `SYSTEM_PROMPT_TRIAGE/FORENSIC`(=`prompts/*.md`).
-**프롬프트는 코드 아니라 `.md` 파일**, **설정은 `.env` 한 줄** — 코드 안 건드리고 튜닝.
-
----
+따라서 긴 캡처 후반의 공격이 초반 정상 HTTP/DNS 트래픽 때문에 잘리는 문제를 방지한다.
+잘린 개수는 `_truncation`에 기록되고 case facts와 LLM packet에도 전달된다. alert도 300개로 제한하되
+숫자 severity보다 MALWARE/EXPLOIT 등의 위협 카테고리를 먼저 보존한다.
 
 ## 실행
 
-### 로컬
 ```bash
-./setup.sh                                       # 최초 1회
-./scripts/extract_log.sh pcaps/<파일>.pcap        # → output/<name>/{suricata,zeek}
-python3 scripts/build_evidence.py <name>          # → output/<name>/evidence.json
-cd llm && python3 run.py <name>                   # → reports/<name>.json   (ollama 필요)
-cd .. && python3 scripts/make_policy.py <name> --validate   # → reports/<name>.rules
-cd llm && python3 render_report.py <name>         # → reports/<name>.md
+./setup.sh
+./scripts/extract_log.sh pcaps/<file>.pcap
+python3 scripts/build_evidence.py <case>
+
+# 결정론적 분석만: Ollama 없이도 동작
+python3 llm/run.py <case> --no-llm
+
+# 결정론적 분석 + 제한된 LLM judgment
+python3 llm/run.py <case>
+
+python3 scripts/make_policy.py <case> --validate
+python3 llm/render_report.py <case>
 ```
 
-### Kaggle
-`kaggle/run_pipeline.ipynb` — Settings에서 **Internet ON + GPU**, pcap 데이터셋 Add Input, Run All.
-재실행은 "★ 재실행 시작점" 셀부터(코드/`.env` 최신화 후 pcap마다 전 단계 자동).
+주요 설정은 `.env`에서 읽는다.
 
----
+```dotenv
+MODEL=qwen3.8:27b-mtp-q4_K_M
+NUM_CTX=65536
+TEMPERATURE=0.3
+SEED=42
+CONTEXT_MAX_CHARS=48000
+REPAIR_ATTEMPTS=1
+```
 
-## 모델 교체 (bakeoff)
+`CONTEXT_MAX_CHARS`와 `REPAIR_ATTEMPTS`는 `.env`에 없어도 위 기본값으로 동작한다.
 
-`.env` 의 `MODEL=` 한 줄만 바꾸면 됨(config.py 단일 소스). 요건은 **tool 지원이 아니라 `format`(구조화 출력) 지원** —
-llama.cpp 그래머라 대부분 모델 가능.
+## 평가 루프
 
-**하드웨어 현실 (2×T4 = 16GB×2, NVLink 없음):**
-- **한 카드(16GB)에 통째로 드는 모델**이 스윗스팟 — split 안 해서 빠름.
-- 27B(≈18GB)는 두 카드에 쪼개져 PCIe 오버헤드 → **pcap당 5분+** (느리지만 배치 포렌식엔 감내 가능).
-- 후보: `gemma3:27b`, `mistral-small3.2:24b`, `phi4:14b`(빠름). 70B·qwen/deepseek 제외.
-- 안 뜨면(OOM) `.env` `NUM_CTX` 낮추기.
+단일 보고서 또는 두 실험 디렉터리를 비교한다.
 
-**비교법**: 같은 pcap 세트로 각 모델을 돌려 결과를 나란히 비교. 코드가 팩트를 받쳐서 **판단 품질만 순수 비교**됨.
+```bash
+python3 scripts/score.py reports
+python3 scripts/score.py --compare experiments/A/model/seed-42 experiments/B/model/seed-42
+python3 scripts/score.py reports --json
+```
 
----
+채점기는 verdict와 grounding 외에 다음을 측정한다.
 
-## 검증 이력
+- victim precision/recall/F1
+- IOC IP, domain, hash precision/recall/F1
+- c2/delivery/exfil 의미 bucket
+- 예상 밖 compromised 호스트와 인프라 오인
+- 명시된 정상 IP/해시 오탐
+- patient zero와 선택적 technique coverage
 
-**2026-07-09 — q1 / q2** (FIRST-2015 계열 허니넷, 같은 망 24h 캡처 이틀치). 처음 보는 pcap에 전 단계(추출→evidence→분석→룰→보고서) 완주. 정답:
-- 웹서버 192.168.0.2 대상 인터넷 익스플로잇은 **시도·실패**: q1 PHP-CGI 인자주입 → 404·콜백없음, q2 Shellshock 802건 → 404·콜백없음.
-- 실제 감염은 알럿이 약하거나 없는 쪽: 192.168.0.53 클릭사기 CnC(88.214.241.199) + DGA(`*service*online*.org`), 192.168.0.54 애드웨어(technologieduluth/wajam, 알럿 0건).
-- 오탐 주의: `pwned.se` 는 LAN DNS 검색 접미사(전부 NXDOMAIN), NVIDIA PE 다운로드는 정상 파일.
+여러 모델과 seed를 반복 실행하려면:
 
-이 실행에서 아래 "알려진 한계"의 1~4번을 확인함.
+```bash
+python3 scripts/evaluate.py \
+  --cases 20210616 20211022 whatthef \
+  --models qwen3.8:27b-mtp-q4_K_M gemma3:27b \
+  --repeats 3
+```
 
----
+각 실행의 report, stdout/stderr, 실행시간, LLM token/duration metadata와 점수는
+`experiments/<UTC timestamp>/` 아래에 보존된다. `reports/<case>.json` 덮어쓰기와 무관하게 이전
+실험을 비교할 수 있다.
 
-## 알려진 한계 / TODO
+## 테스트
 
-**2026-07-09 q1/q2 에서 확인 (코드로 해결 가능):**
-1. **성공/시도 미구분** — 인바운드 웹 익스플로잇이 4xx 응답 + 콜백 부재면 실패인데, 모델은 sev1 알럿만 보고 `confirmed`·`compromised`로 판정. → http.log 응답코드 + conn.log 콜백유무를 코드가 확인해 "시도(실패)" 판정, 그 호스트에 confirmed 금지.
-2. **정상 CDN을 C2로** — `get_external` 필터 한계(위 ⚠️). q1 IOC 20개 모두 정상 CDN, q2 11개 중 88.214.241.199 하나만 진짜. → 알럿 카테고리/severity 게이팅.
-3. **tier1 컨텍스트 초과** — http body로 tier1 비대(q2 ≈ 65k 토큰, NUM_CTX 한계). body 바이트의 99%가 응답 body이고 300행이 방향 무관하게 다 싣는 것이 원인. → 방향 기반 body 예산(내부 서버로 온 요청은 body/헤더 전량, 외부에서 받은 응답은 지문만). 인코딩은 코드가 먼저 디코드(base64/url/gzip) 후 판단.
-4. **근거(grounds) 영어** — `forensic.md` 가 한글을 강제하는 필드가 `timeline.event`/`assessment` 둘뿐 → `grounds` 는 영어 evidence를 미러링. → 한글 강제 목록에 `grounds` 추가.
+```bash
+python3 -m compileall -q llm scripts tests
+python3 -m unittest discover -s tests -v
+bash -n setup.sh scripts/*.sh
+```
 
-**기존 한계:**
-- **모델 천장**: 로컬 26~27B는 run마다 결과가 달라지고(비결정), 덜 뽑거나(도메인 누락) 과하게 넣음(정당 서비스). 코드 가드로 팩트는 지키지만 recall/판단은 모델 몫.
-- **CDN 과차단**: 악성 도메인이 공유 엣지 뒤에 있으면 IP가 CDN 대역으로 풀려, 그 IP를 c2에 넣으면 룰이 CDN 전체를 차단. make_policy `_is_cdn`/`_CDN_NETS` 가 **Cloudflare/Fastly 대역은 IP-drop에서 제외(구현됨)**, 도메인 룰(dns/tls)로 대체. 다만 대역이 Cloudflare/Fastly 한정이라 Dropbox(108.160)·Google·Facebook·Skype·NVIDIA 엣지는 못 거르고, `attach_iocs_from_alerts` 가 severity 1 INFO/CHAT 알럿의 이 IP들을 c2에 넣음. → `_CDN_NETS` 확장 또는 alert 카테고리 게이팅 필요.
-- **서술이 분석 에러를 증폭**: render_report는 분석을 충실히 한글로 풀 뿐, 분석이 틀리면 자신만만하게 틀린 보고서가 됨(예: 근거 없는 측면이동 서술). → adversarial 검증층(red-team) 미구현.
-- **암호화/외부인텔 한계**: TLS 내부 payload·DoH·정상 사이트 악용(github/maven 호스팅) 등은 pcap+시그니처만으론 불가 — 천장이지 버그 아님.
-- **검증셋 좁음**: MTA류 교육용 pcap 위주. 실제 기업망(대용량·멀티호스트·시끄러움) 미검증.
+오프라인 회귀 테스트는 정상 sev1 INFO 경보, C2, 인바운드 공격자/C2 분리, 패킷 프롬프트 인젝션,
+후반 evidence 보존, 도메인 경계, 공용접미사 과차단, 존재하지 않는 LLM ID를 검사한다.
+
+## 구조
+
+```text
+llm/
+  case_facts.py       # evidence → 결정론적 사건 사실과 기존 report 골격
+  run.py              # 제한된 LLM judgment, 검증/1회 복구, 실행 artifact
+  tools.py            # evidence 로더와 provenance helper
+  render_report.py    # 코드 표 + 최소 안전 컨텍스트의 한글 서술
+scripts/
+  build_evidence.py   # 로그 조인, 중요도 기반 evidence 선택
+  baseline.py         # 정상 대비 편차
+  domain_utils.py     # 라벨 경계 및 흔한 다중라벨 suffix 처리
+  make_policy.py      # 결정론적 Suricata 정책
+  score.py            # precision/recall/F1 평가
+  evaluate.py         # 모델/seed 반복 평가 루프
+answers/truth/        # 사람 검수 ground truth
+```
+
+## 남아 있는 천장
+
+- TLS/DoH 내부 payload와 캡처 이전·이후 행위는 PCAP만으로 확정할 수 없다.
+- 도메인 유틸리티는 외부 의존성을 피하려 흔한 다중라벨 suffix만 포함한다. 전 세계 TLD를 다룰 때는
+  고정 버전 Public Suffix List가 필요하다.
+- `confirmed`는 감염 후 행동/성공 증거를 요구하도록 보수적으로 계산한다. 미관측 행위를 추측해
+  recall을 올리지 않는다.
+- 최종 운영 성능은 실제 `output/` 케이스와 정상/의심/확정이 균형 잡힌 holdout에서 반복 측정해야 한다.
+- 공유 CDN IP 차단 방지는 현재 코드에 내장된 대역 목록 범위에 한정된다.

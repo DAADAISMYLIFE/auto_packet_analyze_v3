@@ -1,0 +1,2 @@
+# Ollama Python API. Major version을 제한해 호출 계약의 갑작스러운 변경을 방지한다.
+ollama>=0.4.0,<1.0

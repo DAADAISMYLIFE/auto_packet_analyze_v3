@@ -96,6 +96,8 @@ class Tools:
                 "first_ts": a.get("first_ts"),
                 "src_ips": a.get("src_ips"),
                 "dst_ips": a.get("dst_ips"),
+                "orig_ips": a.get("orig_ips"),
+                "resp_ips": a.get("resp_ips"),
             }
             for a in alerts
         ]

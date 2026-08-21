@@ -25,19 +25,21 @@ import glob
 import json
 import math
 import os
+import re
 import statistics
 import sys
 from collections import Counter, defaultdict
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from baseline import profile_deviations   # 결정론 편차 프로파일 (정상 대비 랭크)
+from baseline import profile_deviations, _cat_weight   # 편차 프로파일 + 공통 alert 분류
 
 # ── 캡 (초과 시 _truncation 기록). 현재 pcap 규모선 거의 안 밟힘 ──
 CAP_EXTERNAL_DOMAINS = 500
 CAP_EXTERNAL_IPS = 500
 CAP_EXTERNAL_SNI = 300
 CAP_ALERT_SAMPLE_CIDS = 3    # alert 시그니처별 드릴다운용 community_id 표본 수
+CAP_ALERTS = 300              # 전량으로 편차를 계산한 뒤 위협 카테고리 우선 선택
 CAP_EXTERNAL_HTTP = 300      # 요청 URL dedup 후 최대 개수
 CAP_URL_LEN = 400            # 초장문 URI(쿼리스트링 유출 등) 방어용 길이 캡
 CAP_REQ_BODY = 512           # POST body 페이로드 — 판별엔 앞부분이면 충분 (컨텍스트 보호)
@@ -68,6 +70,13 @@ LATERAL_PORTS = {135, 139, 445, 3389, 5985}         # 내부 fan-out 대상 포�
 
 LM_LOGS = ["smb_files.log", "smb_mapping.log", "dce_rpc.log",
            "ldap_search.log", "ldap.log", "kerberos.log", "ntlm.log"]
+
+
+def ranked_cap(items, cap, priority=lambda _x: 0):
+    """중요도 우선으로 cap을 채운 뒤 소비 편의를 위해 시간순으로 반환."""
+    ranked = sorted(items, key=lambda x: (-priority(x), x.get("first_ts") is None, x.get("first_ts")))
+    selected = ranked[:cap]
+    return sorted(selected, key=lambda x: (x.get("first_ts") is None, x.get("first_ts"))), max(0, len(ranked) - cap)
 
 
 # ---------------------------------------------------------------------------
@@ -593,11 +602,15 @@ def build_evidence(name, root="/home/qkekdhd/auto_packet_analyze_v3"):
     conn = read_ndjson(f"{Z}/conn.log")
     flow = {}                    # uid -> conn record
     cid_of = {}                  # uid -> community_id
+    endpoints_of_cid = {}         # community_id -> (connection originator, responder)
     for d in conn:
         uid = d.get("uid")
         if uid:
             flow[uid] = d
-            cid_of[uid] = d.get("community_id")
+            cid = d.get("community_id")
+            cid_of[uid] = cid
+            if cid:
+                endpoints_of_cid[cid] = (d.get("id.orig_h"), d.get("id.resp_h"))
 
     # ── suricata eve.json: alert 그룹 (community_id 조인) ──
     #   디코더 진단(checksum 등)은 위협이 아니므로 분리 — alert_cids(하드 시그널)에도 제외
@@ -616,7 +629,8 @@ def build_evidence(name, root="/home/qkekdhd/auto_packet_analyze_v3"):
         alert_cids.add(cid)
         key = (a.get("signature"), a.get("category"), a.get("severity"))
         st = sig_stat.setdefault(key, {"count": 0, "first_ts": None,
-                                       "src": set(), "dst": set(), "cids": []})
+                                       "src": set(), "dst": set(), "orig": set(),
+                                       "resp": set(), "cids": []})
         st["count"] += 1
         ts = suri_ts_to_epoch(d.get("timestamp"))
         if ts and (st["first_ts"] is None or ts < st["first_ts"]):
@@ -625,6 +639,11 @@ def build_evidence(name, root="/home/qkekdhd/auto_packet_analyze_v3"):
             st["src"].add(d["src_ip"])
         if d.get("dest_ip"):
             st["dst"].add(d["dest_ip"])
+        orig, resp = endpoints_of_cid.get(cid, (None, None))
+        if orig:
+            st["orig"].add(orig)
+        if resp:
+            st["resp"].add(resp)
         if cid and len(st["cids"]) < CAP_ALERT_SAMPLE_CIDS and cid not in st["cids"]:
             st["cids"].append(cid)
 
@@ -857,25 +876,51 @@ def build_evidence(name, root="/home/qkekdhd/auto_packet_analyze_v3"):
         if ts and (e["first_ts"] is None or ts < e["first_ts"]):
             e["first_ts"] = ts
 
-    # 시간순 정렬 + 캡 (초과분은 _truncation)
-    def capped(d, cap, label):
-        items = sorted(d.values(), key=lambda x: (x["first_ts"] is None, x["first_ts"]))
-        if len(items) > cap:
-            trunc[label] = len(items) - cap
-            items = items[:cap]
+    # anomaly 목적지도 cap 전에 계산해 시그니처 없는 beacon/exfil을 우선 보존한다.
+    anomalies = build_anomalies(conn, hosts, dns_recs)
+    anomalies["brute_force"] = build_bruteforce(conn, Z, hosts, read_ndjson)
+    anomaly_ips = {str(x.get("dst")) for key in ("beacons", "exfil_candidates", "no_dns_direct")
+                   for x in (anomalies.get(key) or []) if x.get("dst")}
+
+    # 중요도 우선 선택 + 시간순 정렬. 후반 공격이 초반 정상 트래픽 cap 뒤에서
+    # 사라지지 않게 alert-linked/공격 payload/의심 TLD를 먼저 보존한다.
+    _web_pat = re.compile(r"(?:\.\.\/|%2e%2e|union(?:%20|\+|\s)+select|\(\)\s*\{\s*:\s*;|[?&](?:cmd|exec)=|filename=.*\.(?:php|jsp|aspx))", re.I)
+    _susp_tld = re.compile(r"\.(?:su|cc|cyou|xyz|top|tk|gq|ml|cf|ga)$", re.I)
+
+    def capped(d, cap, label, priority=lambda _x: 0):
+        items, dropped = ranked_cap(list(d.values()), cap, priority)
+        if dropped:
+            trunc[label] = dropped
         return items
 
+    def http_priority(x):
+        blob = " ".join(str(x.get(k) or "") for k in ("url", "req_body", "req_headers"))
+        return 100 if _web_pat.search(blob) else (40 if x.get("dst_ip") in alert_ips else 0)
+
+    full_external = {
+        "ips": sorted(ext_ip.values(), key=lambda x: (x["first_ts"] is None, x["first_ts"])),
+        "domains": sorted(ext_dom.values(), key=lambda x: (x["first_ts"] is None, x["first_ts"])),
+        "sni": sorted(ext_sni.values(), key=lambda x: (x["first_ts"] is None, x["first_ts"])),
+        "http": sorted(ext_http.values(), key=lambda x: (x["first_ts"] is None, x["first_ts"])),
+    }
     external = {
-        "ips": capped(ext_ip, CAP_EXTERNAL_IPS, "external_ips_dropped"),
-        "domains": capped(ext_dom, CAP_EXTERNAL_DOMAINS, "external_domains_dropped"),
-        "sni": capped(ext_sni, CAP_EXTERNAL_SNI, "external_sni_dropped"),
-        "http": capped(ext_http, CAP_EXTERNAL_HTTP, "external_http_dropped"),
+        "ips": capped(ext_ip, CAP_EXTERNAL_IPS, "external_ips_dropped",
+                      lambda x: 80 if x.get("ip") in alert_ips else (60 if x.get("ip") in anomaly_ips else 0)),
+        "domains": capped(ext_dom, CAP_EXTERNAL_DOMAINS, "external_domains_dropped",
+                          lambda x: 80 if set(x.get("answers") or []) & alert_ips else
+                          (60 if _susp_tld.search(x.get("query") or "") else
+                           (50 if set(x.get("answers") or []) & anomaly_ips else 0))),
+        "sni": capped(ext_sni, CAP_EXTERNAL_SNI, "external_sni_dropped",
+                      lambda x: 60 if _susp_tld.search(x.get("sni") or "") else 0),
+        "http": capped(ext_http, CAP_EXTERNAL_HTTP, "external_http_dropped", http_priority),
     }
 
-    # ── alerts: severity 우선(1 먼저), 동률이면 count 많은 순 ──
+    # ── alerts: 위협 카테고리 우선, 그 안에서 severity/count 순 ──
+    # ET INFO/CHAT의 sev1이 진짜 MALWARE 경보보다 앞서는 문제를 막는다.
     def sev_key(item):
         (sig, cat, sev), st = item
-        return (sev if sev is not None else 99, -st["count"])
+        hard, soft = _cat_weight(sig or "")
+        return (-hard, -soft, sev if sev is not None else 99, -st["count"])
 
     alerts = []
     for (sig, cat, sev), st in sorted(sig_stat.items(), key=sev_key):
@@ -883,18 +928,18 @@ def build_evidence(name, root="/home/qkekdhd/auto_packet_analyze_v3"):
             "signature": sig, "category": cat, "severity": sev,
             "count": st["count"], "first_ts": st["first_ts"],
             "src_ips": sorted(st["src"]), "dst_ips": sorted(st["dst"]),
+            "orig_ips": sorted(st["orig"]), "resp_ips": sorted(st["resp"]),
             "sample_community_ids": st["cids"],
         })
+    all_alerts = alerts
+    if len(alerts) > CAP_ALERTS:
+        trunc["alerts_dropped"] = len(alerts) - CAP_ALERTS
+        alerts = alerts[:CAP_ALERTS]
 
     # ── meta / 조립 ──
     conn_ts = [d.get("ts") for d in conn if d.get("ts")]
     cap_start = min(conn_ts) if conn_ts else None
     cap_end = max(conn_ts) if conn_ts else None
-
-    # anomalies = 무시그니처 행동 측정. brute_force(반복/속도/인증실패)를 같은 채널에 합류
-    #   → get_anomalies 로 자동 노출되어 LLM 이 시그니처 0건이어도 '양'으로 판단 가능.
-    anomalies = build_anomalies(conn, hosts, dns_recs)
-    anomalies["brute_force"] = build_bruteforce(conn, Z, hosts, read_ndjson)
 
     evidence = {
         "meta": {
@@ -917,7 +962,8 @@ def build_evidence(name, root="/home/qkekdhd/auto_packet_analyze_v3"):
     }
     # 결정론 편차 프로파일 — 정상(baseline) 대비 튀는 것만 랭크. LLM 이 raw 덤프 대신
     #   여기부터 보게 해서 잘림 방어 + 오탐(MS텔레메트리·광고·AD RPC)을 뿌리에서 강등.
-    evidence["deviations"] = profile_deviations(evidence)
+    deviation_input = {**evidence, "external": full_external, "alerts": all_alerts}
+    evidence["deviations"] = profile_deviations(deviation_input)
     return evidence
 
 

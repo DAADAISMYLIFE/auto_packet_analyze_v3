@@ -2,8 +2,8 @@ import json
 from ollama import chat, ChatResponse
 
 from test_tools import TOOLS, AVAILABLE
+from config import MODEL
 
-MODEL = "gemma4:26b"
 
 def test_hello():
     response: ChatResponse = chat(model=MODEL, messages=[
