@@ -59,6 +59,11 @@ def sha256_file(path):
     return digest.hexdigest()
 
 
+def save_manifest(exp_dir, manifest):
+    with open(os.path.join(exp_dir, "manifest.json"), "w", encoding="utf-8") as handle:
+        json.dump(manifest, handle, ensure_ascii=False, indent=2)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--cases", nargs="+", default=None)
@@ -68,6 +73,8 @@ def main():
     parser.add_argument("--no-llm", action="store_true")
     parser.add_argument("--max-context-chars", type=int, default=48000)
     parser.add_argument("--experiments", default=os.path.join(ROOT, "experiments"))
+    parser.add_argument("--keep-going", action="store_true",
+                        help="실패한 case의 로그를 출력하되 나머지 조합도 계속 실행")
     args = parser.parse_args()
 
     cases = args.cases or available_cases()
@@ -94,6 +101,7 @@ def main():
         },
     }
 
+    failures = 0
     for model in models:
         for repeat in range(args.repeats):
             seed = args.seed_start + repeat
@@ -126,12 +134,24 @@ def main():
                                            os.path.join(ROOT, "output"))
                     record["score"] = result
                 manifest["runs"].append(record)
-                print(f"[{model} seed={seed}] {case}: rc={proc.returncode} {elapsed}s")
+                print(f"[{model} seed={seed}] {case}: rc={proc.returncode} {elapsed}s", flush=True)
+                if proc.returncode != 0:
+                    failures += 1
+                    detail = (proc.stderr or proc.stdout or "(출력 없음)").strip()
+                    print(f"\n[failed] {case} — {log_path}\n{detail[-6000:]}\n",
+                          file=sys.stderr, flush=True)
+                    if not args.keep_going:
+                        save_manifest(exp_dir, manifest)
+                        print(f"[experiment: failed] {exp_dir}", file=sys.stderr, flush=True)
+                        return 1
 
-    with open(os.path.join(exp_dir, "manifest.json"), "w", encoding="utf-8") as handle:
-        json.dump(manifest, handle, ensure_ascii=False, indent=2)
+    save_manifest(exp_dir, manifest)
     print(f"[experiment] {exp_dir}")
+    if failures:
+        print(f"[experiment: failed] {failures} run(s) failed", file=sys.stderr)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

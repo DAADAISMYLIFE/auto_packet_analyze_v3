@@ -85,7 +85,7 @@ def _http_disposition(record, technique):
 def derive_case_facts(tools):
     """Tools 인스턴스의 evidence에서 작고 검증 가능한 사건 사실을 만든다."""
     ev = tools.evidence
-    hosts = [h for h in ev.get("hosts", []) if h.get("ip")]
+    hosts = [h for h in (ev.get("hosts") or []) if h.get("ip")]
     by_ip = {str(h["ip"]).lower(): h for h in hosts}
     internal = set(by_ip)
     host_signals = defaultdict(list)
@@ -139,10 +139,10 @@ def derive_case_facts(tools):
         ref = f"alert:{idx}"
         threat_cids.update(alert.get("sample_community_ids") or [])
         ts = _first_ts(alert)
-        srcs = {str(x).lower() for x in alert.get("src_ips", []) if x}
-        dsts = {str(x).lower() for x in alert.get("dst_ips", []) if x}
-        origs = {str(x).lower() for x in alert.get("orig_ips", []) if x}
-        resps = {str(x).lower() for x in alert.get("resp_ips", []) if x}
+        srcs = {str(x).lower() for x in (alert.get("src_ips") or []) if x}
+        dsts = {str(x).lower() for x in (alert.get("dst_ips") or []) if x}
+        origs = {str(x).lower() for x in (alert.get("orig_ips") or []) if x}
+        resps = {str(x).lower() for x in (alert.get("resp_ips") or []) if x}
         # community_id 조인이 있으면 연결 initiator/responder가 행위 방향의 기준이다.
         # 구형 evidence에는 필드가 없으므로 src/dst로 보수적 fallback한다.
         actors, targets = (origs, resps) if (origs or resps) else (srcs, dsts)
@@ -191,7 +191,7 @@ def derive_case_facts(tools):
             continue
         ref = f"http:{idx}"
         ts = _first_ts(http)
-        srcs = [str(x).lower() for x in http.get("src_ips", []) if x]
+        srcs = [str(x).lower() for x in (http.get("src_ips") or []) if x]
         actor = srcs[0] if srcs else "unknown"
         target = str(http.get("dst_ip") or "unknown").lower()
         disposition = _http_disposition(http, technique)
@@ -243,8 +243,8 @@ def derive_case_facts(tools):
 
     # 파일 해시는 코드가 provenance로 정상 업데이트를 제거한 결과만 사용한다.
     hash_result = tools.malware_candidate_hashes()
-    file_by_hash = {str(f.get("sha256") or "").lower(): f for f in ev.get("files", []) if f.get("sha256")}
-    for sha in hash_result.get("malware", []):
+    file_by_hash = {str(f.get("sha256") or "").lower(): f for f in (ev.get("files") or []) if f.get("sha256")}
+    for sha in (hash_result.get("malware") or []):
         rec = file_by_hash.get(sha, {})
         linked = bool(set(rec.get("community_ids") or []) & threat_cids)
         add_candidate(sha, "hash", "high" if linked else "medium", linked, "hashes",
@@ -257,7 +257,7 @@ def derive_case_facts(tools):
         query = normalize_domain(domain.get("query"))
         if not query or is_public_suffix(query):
             continue
-        answers = {str(x).lower() for x in domain.get("answers", []) if IPV4.fullmatch(str(x))}
+        answers = {str(x).lower() for x in (domain.get("answers") or []) if IPV4.fullmatch(str(x))}
         linked = answers & high_ips
         ref = f"dns:{idx}"
         if linked:

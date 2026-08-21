@@ -94,6 +94,21 @@ class CaseFactsTests(unittest.TestCase):
         facts = derive_case_facts(FakeTools(ev))
         self.assertEqual(facts["verdict"], "no_incident")
 
+    def test_nullable_evidence_collections_do_not_crash_case_facts(self):
+        ev = evidence(
+            alerts=[{"signature": "ET MALWARE Example", "src_ips": None,
+                     "dst_ips": None, "orig_ips": None, "resp_ips": None}],
+            http=[{"url": "target.test/?cmd=id", "src_ips": None,
+                   "dst_ip": "10.0.0.5", "status": 404}],
+            domains=[{"query": "unanswered.example", "answers": None}],
+        )
+        ev["files"] = None
+
+        facts = derive_case_facts(FakeTools(ev))
+
+        self.assertEqual(facts["verdict"], "suspicious")
+        self.assertEqual(facts["attacks"][0]["disposition"], "attempted")
+
     def test_unknown_ids_fail_validation(self):
         facts = derive_case_facts(FakeTools(evidence()))
         judgment = {"ioc_classification": [{"candidate_id": "obs:999", "bucket": "c2"}],
