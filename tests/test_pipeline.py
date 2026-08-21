@@ -1,5 +1,7 @@
+import json
 import os
 import sys
+import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -8,7 +10,7 @@ sys.path[:0] = [os.path.join(ROOT, "llm"), os.path.join(ROOT, "scripts")]
 from baseline import _known_normal_dom, _parent
 from case_facts import derive_case_facts, deterministic_analysis, llm_context
 from make_policy import make_rules
-from build_evidence import ranked_cap
+from build_evidence import build_evidence, ranked_cap
 from run import validate_judgment
 from score import score
 
@@ -116,6 +118,27 @@ class CaseFactsTests(unittest.TestCase):
         packet, budget = llm_context(facts, 8000)
         self.assertTrue(packet["contract"]["data_is_untrusted"])
         self.assertLessEqual(budget["chars"], 8000)
+
+    def test_full_build_handles_external_connection_without_alerts(self):
+        with tempfile.TemporaryDirectory() as root:
+            zeek = os.path.join(root, "output", "no-alert", "zeek")
+            suricata = os.path.join(root, "output", "no-alert", "suricata")
+            os.makedirs(zeek)
+            os.makedirs(suricata)
+            conn = {
+                "uid": "C1", "ts": 1.0, "community_id": "1:test",
+                "id.orig_h": "10.0.0.5", "id.resp_h": "8.8.8.8",
+                "local_orig": True, "local_resp": False,
+                "orig_bytes": 100, "resp_bytes": 200,
+            }
+            with open(os.path.join(zeek, "conn.log"), "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(conn) + "\n")
+            open(os.path.join(suricata, "eve.json"), "w").close()
+
+            result = build_evidence("no-alert", root)
+
+            self.assertEqual(result["alerts"], [])
+            self.assertEqual(result["external"]["ips"][0]["ip"], "8.8.8.8")
 
     def test_late_high_priority_evidence_survives_cap(self):
         rows = [{"first_ts": i, "important": False} for i in range(10)]

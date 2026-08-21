@@ -647,6 +647,11 @@ def build_evidence(name, root="/home/qkekdhd/auto_packet_analyze_v3"):
         if cid and len(st["cids"]) < CAP_ALERT_SAMPLE_CIDS and cid not in st["cids"]:
             st["cids"].append(cid)
 
+    # cap 우선순위에서 참조하는 alert endpoint 집합. alert가 하나도 없어도 빈 set으로
+    # 정의돼야 external IP가 있는 정상/무경보 캡처에서 NameError가 나지 않는다.
+    alert_ips = {ip for st in sig_stat.values() for field in ("src", "dst", "orig", "resp")
+                 for ip in st[field] if ip}
+
     # ── http.log: 웹 요청 URL (dedup: method+host+uri) ──
     #   URI 는 path traversal/웹셸/쿼리스트링 유출이 그대로 드러나는 유일한 필드.
     #   집계만 하고 판단 없음. uid→url 맵은 files 의 전달 URL 부착에 재사용.
