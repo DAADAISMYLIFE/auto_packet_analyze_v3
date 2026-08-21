@@ -29,7 +29,7 @@ if [ "$(id -u)" -eq 0 ]; then SUDO=""; else SUDO="sudo"; fi
 log "0/5  apt 갱신"
 $SUDO apt-get update -y
 $SUDO apt-get install -y curl gnupg ca-certificates lsb-release software-properties-common
-$SUDO apt-get install -y zstd python3-venv
+$SUDO apt-get install -y zstd python3-venv python3-pip
 
 # -----------------------------------------------------------------------------
 # 1) Suricata + 룰
@@ -126,12 +126,27 @@ fi
 # 5) test.py 실행
 # -----------------------------------------------------------------------------
 log "5/5  llm/test.py 실행 (응답 확인)"
-# 프로젝트 전용 venv + 버전 범위가 기록된 requirements 사용
-if [ ! -x "$VENV/bin/python" ]; then
-  python3 -m venv "$VENV"
+# 로컬에서는 프로젝트 venv를 우선한다. Kaggle Python은 ensurepip가 빠진 경우가
+# 있으므로 venv 생성이 실패하면 세션 전용 시스템 Python으로 안전하게 폴백한다.
+PY=""
+if [ -x "$VENV/bin/python" ] && "$VENV/bin/python" -m pip --version >/dev/null 2>&1; then
+  PY="$VENV/bin/python"
+elif python3 -m venv "$VENV"; then
+  PY="$VENV/bin/python"
+else
+  warn "venv 생성 실패(ensurepip 없음) — 현재 Python 환경을 사용합니다"
+  PY="$(command -v python3)"
 fi
-PY="$VENV/bin/python"
-"$PY" -m pip install --quiet -r "$ROOT/requirements.txt" || warn "Python 의존성 설치 실패"
+
+if ! "$PY" -m pip --version >/dev/null 2>&1; then
+  warn "$PY 에 pip가 없어 python3-pip를 다시 설치합니다"
+  $SUDO apt-get install -y python3-pip
+fi
+
+if ! "$PY" -m pip install --quiet -r "$ROOT/requirements.txt"; then
+  # Debian/Ubuntu의 externally-managed Python에서만 필요한 폴백.
+  "$PY" -m pip install --quiet --break-system-packages -r "$ROOT/requirements.txt"
+fi
 
 "$PY" "$ROOT/llm/test.py"
 
@@ -139,3 +154,4 @@ log "✅ 셋업 완료"
 echo "  - Suricata : $ROOT/scripts/run_suricata.sh <pcap>"
 echo "  - Zeek     : $ROOT/scripts/run_zeek.sh <pcap>"
 echo "  - 모델     : $MODEL"
+echo "  - Python   : $PY"
