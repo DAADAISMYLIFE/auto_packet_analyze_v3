@@ -52,8 +52,8 @@ def narrative(analysis):
         return {"overview_ko": f"(LLM 미가용 — 스텁) 영문 요약: {summ}",
                 "scenario_ko": "(LLM 미가용 — 스텁) 타임라인 표 참조.",
                 "recommendation_ko": "(LLM 미가용 — 스텁) 아래 차단 정책을 검토 후 적용 여부를 선택하십시오."}
-    from config import MODEL, OPTS
-    res = chat(model=MODEL, format=NARRATIVE_SCHEMA, think=False,
+    from config import MODEL, OPTS, THINK
+    res = chat(model=MODEL, format=NARRATIVE_SCHEMA, think=THINK,   # .env THINK 단일 소스
                messages=[{"role": "system", "content": NARR_PROMPT},
                          {"role": "user", "content": json.dumps(analysis, ensure_ascii=False, default=str)}],
                options=OPTS)

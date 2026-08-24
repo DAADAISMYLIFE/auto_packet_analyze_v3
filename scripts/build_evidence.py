@@ -31,7 +31,7 @@ from collections import Counter, defaultdict
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from baseline import profile_deviations   # 결정론 편차 프로파일 (정상 대비 랭크)
+from baseline import profile_deviations, threat_class   # 결정론 편차 + 시그니처 위협분류(단일 소스)
 
 # ── 캡 (초과 시 _truncation 기록). 현재 pcap 규모선 거의 안 밟힘 ──
 CAP_EXTERNAL_DOMAINS = 500
@@ -881,6 +881,8 @@ def build_evidence(name, root="/home/qkekdhd/auto_packet_analyze_v3"):
     for (sig, cat, sev), st in sorted(sig_stat.items(), key=sev_key):
         alerts.append({
             "signature": sig, "category": cat, "severity": sev,
+            # 코드가 아는 위협/정황 구분을 LLM·가드 모두에게 준다 (severity 숫자 불신).
+            "threat_class": threat_class(sig),
             "count": st["count"], "first_ts": st["first_ts"],
             "src_ips": sorted(st["src"]), "dst_ips": sorted(st["dst"]),
             "sample_community_ids": st["cids"],

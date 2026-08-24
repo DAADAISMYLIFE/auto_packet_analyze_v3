@@ -92,6 +92,7 @@ class Tools:
                 "signature": a.get("signature"),
                 "category": a.get("category"),
                 "severity": a.get("severity"),
+                "threat_class": a.get("threat_class"),   # 코드의 위협/정황 분류 → LLM 에 노출
                 "count": a.get("count"),
                 "first_ts": a.get("first_ts"),
                 "src_ips": a.get("src_ips"),

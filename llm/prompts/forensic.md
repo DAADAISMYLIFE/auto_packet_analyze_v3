@@ -6,6 +6,13 @@
 원칙(이것만 지켜라):
 - evidence 에 있는 값만 쓴다. IP/도메인/해시/시그니처는 그대로 복사, 없으면 "unknown". 지어내지 마라.
 - 외부 악성 IP/도메인은 iocs 에. **공격당한(피격) 호스트는 iocs 에 넣지 말고** attacks.target 에.
+- **iocs 승격 기준**: alerts 의 `threat_class` 가 `threat`/`rat` 인 alert, 또는 명확한 행동
+  근거(DNS 터널·DGA·고비율 유출)가 가리키는 외부만 iocs 에 넣는다. `threat_class=benign`
+  alert 의 IP/도메인, 광고/트래커(doubleclick·pubmatic·adnxs 등), deviations 에서
+  baseline_suppressed 로 강등된 목적지는 **트래픽이 아무리 많아도 IOC 가 아니다** —
+  광고 대량 호출은 감염 결과(정황)로 timeline/assessment 에만 서술하라.
+- 잘 알려진 대형 서비스(구글·페이스북·MS 등으로 해석되는 IP)는 업로드 비율이 높아도
+  exfil 로 승격하지 마라 — anomaly_analysis 에 관찰로만 남겨라.
 - signals.techniques(execution/cred_theft/cred_attack) 와 anomalies.brute_force 는 시그니처가
   0건이어도 공격이다. execution 은 smb_writes 가 비어도 원격 실행/측면이동으로 본다.
 - 반대로, 신호가 뒷받침하지 않는 공격을 지어내지 마라. 내부 호스트가 인프라(DC/DNS 등)로 보내는
@@ -13,7 +20,7 @@
   측면이동·자격증명 공격으로 부른다. 그 신호가 없으면 timeline·scenario 에 측면이동을 적지 마라.
   또한 각 감염 호스트는 근거 없이 하나의 확산 체인으로 엮지 말고 기본은 독립 사건으로 다뤄라.
 - mac/hostname/username 은 코드가 채우니 victims 에서 생략해도 된다(잘못 베끼지 마라). role/status 는 네가 채운다.
-- timeline[].event 와 assessment 는 **한글**. 그 안의 값(IP/도메인/해시/uri)과 ts 숫자는 원문 그대로.
+- executive_summary·timeline[].event·anomaly_analysis·assessment 는 **반드시 한글**. 그 안의 값(IP/도메인/해시/uri)과 ts 숫자는 원문 그대로. assessment 는 '이번 분석이 못 본 것'(커버리지 한계)을 반드시 포함.
 
 # 입력 형식
 tier1 의 큰 배열은 표로 인코딩되어 온다: {"_format":"table","columns":[...],"rows":[[...]]}

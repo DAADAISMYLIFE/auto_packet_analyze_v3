@@ -34,10 +34,17 @@ _load_dotenv(_ENV)
 MODEL = os.environ.get("MODEL", "gemma4:26b")
 NUM_CTX = int(os.environ.get("NUM_CTX", "65536"))   # evidence 안 잘리게 크게 (VRAM 되면 NUM_CTX=131072 로 더)
 TEMPERATURE = float(os.environ.get("TEMPERATURE", "0.3"))
+TOP_P = float(os.environ.get("TOP_P", "0.95"))
 SEED = int(os.environ.get("SEED", "42"))
+# 추론(thinking) 모드. qwen3.8 같은 reasoning 모델은 추론이 본체라 끄면 판단력이 급감한다.
+#   ollama 는 모델 템플릿을 제네릭으로 갈아끼워 reasoning_effort(low/medium)를 못 넘기므로
+#   선택지는 켬(xhigh) / 끔 뿐. 배치 포렌식은 켠 채로 시간을 재는 게 기본.
+#   주의: ollama 는 think=false 일 때 format(스키마 강제)을 조용히 무시하는 버그 이력이 있다
+#   (ollama #14645/#15260) — 끌 때는 노트북의 format 강제 진단을 반드시 확인.
+THINK = os.environ.get("THINK", "true").strip().lower() in ("1", "true", "yes", "on")
 
 # ollama chat 에 그대로 넘기는 옵션
-OPTS = {"temperature": TEMPERATURE, "seed": SEED, "num_ctx": NUM_CTX}
+OPTS = {"temperature": TEMPERATURE, "top_p": TOP_P, "seed": SEED, "num_ctx": NUM_CTX}
 
 # ── 시스템 프롬프트 (파일에서 로드) ──
 SYSTEM_PROMPT_TRIAGE = (_PROMPTS / "triage.md").read_text(encoding="utf-8")

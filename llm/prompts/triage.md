@@ -3,7 +3,11 @@
 이 캡처에 보안 사고 정황이 있는지만 판정한다(보고서는 안 씀). 출력은 스키마(format 강제)대로
 `verdict` + `grounds` JSON 하나.
 - grounds 는 한글 문장, evidence 값(IP·시그니처·수치)은 그대로 복사(재타이핑 금지).
-- 정황 없으면 no_incident 가 정답이다(억지로 만들지 마라). alerts/멀웨어 파일 있으면 confirmed.
+- alerts 의 `threat_class` 를 믿어라 — severity 숫자(1)로 판단하지 마라:
+  `threat`/`rat` 만 위협 근거다. `benign`(INFO/CHAT/FILE_SHARING — Skype·Dropbox·
+  광고 등 앱 정황)은 severity 1 이어도 위협 근거가 아니다.
+- 정황 없으면 no_incident 가 정답이다(억지로 만들지 마라). threat_class=threat 인
+  alerts/멀웨어 파일 있으면 confirmed.
   시그니처 0건이어도 signals.techniques(execution/cred_theft/cred_attack)·anomalies.brute_force·
   공격 패턴(uri/req_body/req_headers) 이 있으면 최소 suspicious.
 

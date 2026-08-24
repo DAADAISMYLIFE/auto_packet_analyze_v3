@@ -64,15 +64,31 @@ _CAT_BENIGN = re.compile(
     r"USER_AGENTS|TFTP|DNS)\b", re.I)
 
 
+def threat_class(sig):
+    """시그니처 → 위협 분류. 파이프라인 공용 '단일 소스' — 숫자 severity 는 못 믿는다
+    (ET CHAT Skype 가 sev1). build_evidence 가 alert 마다 이 값을 threat_class 필드로
+    스탬프해서: (1) LLM 이 tier1 에서 바로 보고(benign 알럿에 안 속음), (2) run.py 승격
+    게이트가 정규식 복사본 대신 필드를 읽는다.
+      threat       위협 카테고리 (MALWARE/EXPLOIT/WEB_SERVER/SCAN/…)
+      rat          원격제어 (REMOTE_ACCESS — NetSupport 등, 위협으로 취급)
+      benign       앱 정황 (INFO/CHAT/FILE_SHARING/POLICY — 위협 아님, IOC 승격 금지)
+      unclassified 미분류 (약한 신호)"""
+    s = sig or ""
+    if _CAT_THREAT.search(s):
+        return "threat"
+    if _CAT_RAT.search(s):
+        return "rat"
+    if _CAT_BENIGN.search(s):
+        return "benign"
+    return "unclassified"
+
+
 def _cat_weight(sig):
     """시그니처 카테고리 → (hard 가중치, soft 가중치). 위협=hard, 앱정황=0, 미분류=soft."""
-    if _CAT_THREAT.search(sig):
-        return 4, 0
-    if _CAT_RAT.search(sig):
-        return 3, 0                       # RAT — 실제 위협(NetSupport 등)
-    if _CAT_BENIGN.search(sig):
-        return 0, 0                       # INFO/CHAT/FILE_SHARING = 앱 정황, 위협 아님
-    return 0, 1                           # 미분류 = 약한 신호
+    return {"threat": (4, 0),
+            "rat": (3, 0),                # RAT — 실제 위협(NetSupport 등)
+            "benign": (0, 0),             # INFO/CHAT/FILE_SHARING = 앱 정황, 위협 아님
+            }.get(threat_class(sig), (0, 1))   # 미분류 = 약한 신호
 
 
 def _is_normal_ip(ip):

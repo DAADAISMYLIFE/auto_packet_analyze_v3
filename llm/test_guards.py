@@ -1,0 +1,271 @@
+#!/usr/bin/env python3
+"""가드(코드 소유 후처리) 유닛테스트 — LLM/GPU/pcap 없이 1초 안에 돈다.
+
+왜: 가드는 이 레포에서 제일 정교한 문자열 수술(옥텟 재조립·장식 벗기기·버킷 이관·suffix 매칭)인데
+검증 수단이 전체 파이프라인 e2e 뿐이었다. e2e 는 모델 비결정성과 섞여 "가드가 깨졌나 / 모델이
+오늘 이상한가"를 구분 못 한다. 여기선 'LLM 이 이렇게 망친 답을 줬다 치자'를 dict 로 만들어
+가드가 제대로 고치는지만 본다.
+
+실행:  cd llm && python3 test_guards.py        (pytest 있으면 pytest test_guards.py 도 됨)
+노트북(Kaggle)은 파이프라인 전에 이걸 돌려 빨간불이면 멈춘다.
+"""
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from tools import Tools
+import run
+from run import (CaseContext, PASSES, apply_guards, attach_identity, demote_infra_victims,
+                 attach_hashes, ground_iocs, annotate_attacks, attach_iocs_from_alerts,
+                 attach_iocs_from_dns, attach_inbound_threat_ips, _is_threat_alert)
+
+
+# ─────────────────────────── 픽스처 ───────────────────────────
+class FakeTools(Tools):
+    """evidence 를 파일이 아니라 dict 로 받는 Tools. observed_iocs 등은 진짜 구현을 그대로 탄다."""
+    def __init__(self, evidence, malware=None, benign=None):
+        self.evidence = evidence
+        self._mal, self._ben = malware or [], benign or []
+
+    def malware_candidate_hashes(self):           # zeek 로그 조인 없이 결과만 주입
+        return {"malware": self._mal, "benign_excluded": self._ben}
+
+
+def ev(hosts=None, ext_ips=(), domains=None, sni=(), alerts=None, files=None):
+    """최소 evidence. hosts=[(ip, role, extra)] / domains=[(query, [answers])]."""
+    return {
+        "hosts": [dict({"ip": ip, "role": role, "mac": f"aa:{i}", "hostname": f"h{i}",
+                        "username": f"u{i}"}, **(extra or {}))
+                  for i, (ip, role, extra) in enumerate(hosts or [])],
+        "external": {
+            "ips": [{"ip": ip} for ip in ext_ips],
+            "domains": [{"query": q, "answers": list(a)} for q, a in (domains or [])],
+            "sni": [{"sni": s} for s in sni],
+        },
+        "alerts": alerts or [],
+        "files": files or [],
+    }
+
+
+def alert(sig, src, dst, threat_class=None, severity=1):
+    a = {"signature": sig, "severity": severity, "src_ips": list(src), "dst_ips": list(dst)}
+    if threat_class is not None:
+        a["threat_class"] = threat_class
+    return a
+
+
+def ctx_for(analysis, evidence, **kw):
+    return CaseContext(analysis, FakeTools(evidence, **kw))
+
+
+WS, DC = ("10.0.0.5", "workstation", None), ("10.0.0.2", "domain_controller", {"ad_domain": "corp.local"})
+
+
+# ─────────────────────────── attach_identity ───────────────────────────
+def test_identity_octet_reassembly_and_join():
+    e = ev(hosts=[WS])
+    a = {"victims": [{"ip": "10.0_0.5", "hostname": "CFA3467(오염)", "mac": "zz"}],
+         "patient_zero": "10.0.0.5 (First observed at ...)"}
+    attach_identity(a, ctx_for(a, e))
+    v = a["victims"][0]
+    assert v["ip"] == "10.0.0.5", v                      # 구분자 손상 복구 (호스트 대조로만)
+    assert v["hostname"] == "h0" and v["mac"] == "aa:0"  # LLM 오염값을 evidence 로 덮어씀
+    assert v["role"] == "workstation"
+    assert a["patient_zero"] == "10.0.0.5"               # 장식 제거
+
+
+def test_identity_no_guessing_for_unknown_ip():
+    e = ev(hosts=[WS])
+    a = {"victims": [{"ip": "10.0.0.99", "hostname": "ghost"}]}
+    attach_identity(a, ctx_for(a, e))
+    v = a["victims"][0]
+    assert v["ip"] == "10.0.0.99"                         # 호스트가 아니면 원문 유지(추측 금지)
+    assert v["hostname"] is None and v["mac"] is None    # 정체는 환각 제거 → None
+
+
+# ─────────────────────────── attach_hashes ───────────────────────────
+def test_hashes_filled_by_code_and_benign_exposed():
+    a = {"iocs": {"hashes": []}}
+    c = ctx_for(a, ev(), malware=["a" * 64], benign=[{"sha256": "b" * 64, "serving_host": "x.windowsupdate.com"}])
+    attach_hashes(a, c)
+    assert a["iocs"]["hashes"] == ["a" * 64]
+    assert a["_excluded_benign_hashes"][0]["serving_host"].endswith("windowsupdate.com")
+
+
+# ─────────────────────────── ground_iocs ───────────────────────────
+def test_ground_removes_unobserved_keeps_observed_strips_decoration():
+    e = ev(hosts=[WS], ext_ips=["1.2.3.4"])
+    a = {"iocs": {"c2": ["1.2.3.4 (HTTP Beacon)", "9.9.9.9"], "delivery": [], "exfil": [], "domains": []}}
+    ground_iocs(a, ctx_for(a, e))
+    assert a["iocs"]["c2"] == ["1.2.3.4"]
+    assert [r["value"] for r in a["_rejected_iocs"]] == ["9.9.9.9"]
+    assert "환각" in a["_rejected_iocs"][0]["reason"]
+
+
+def test_ground_salvages_domain_misplaced_in_ip_bucket():
+    e = ev(hosts=[WS], ext_ips=["1.2.3.4"], domains=[("evil.com", ["1.2.3.4"])])
+    a = {"iocs": {"c2": ["http://evil.com/gate.php"], "delivery": [], "exfil": [], "domains": []}}
+    ground_iocs(a, ctx_for(a, e))
+    assert a["iocs"]["c2"] == []
+    assert a["iocs"]["domains"] == ["evil.com"]           # IP 버킷 → domains 이관
+
+
+def test_ground_rejects_internal_assets_ip_and_ad_zone():
+    e = ev(hosts=[WS, DC], ext_ips=["1.2.3.4"], domains=[("evil.com", ["1.2.3.4"])])
+    a = {"iocs": {"c2": ["10.0.0.2"], "delivery": [], "exfil": [],
+                  "domains": ["dc1.corp.local", "corp.local", "evil.com"]}}
+    ground_iocs(a, ctx_for(a, e))
+    assert a["iocs"]["c2"] == []
+    assert a["iocs"]["domains"] == ["evil.com"]
+    reasons = {r["value"]: r["reason"] for r in a["_rejected_iocs"]}
+    assert "내부 자산" in reasons["10.0.0.2"] and "내부 자산" in reasons["dc1.corp.local"]
+
+
+def test_ground_domain_suffix_ok_but_tld_floor_blocks():
+    e = ev(hosts=[WS], domains=[("mail.evil.com", ["1.2.3.4"]), ("x.co.kr", ["5.6.7.8"])])
+    a = {"iocs": {"c2": [], "delivery": [], "exfil": [],
+                  "domains": ["evil.com", "com", "co.kr", "mail.evil.com"]}}
+    ground_iocs(a, ctx_for(a, e))
+    assert a["iocs"]["domains"] == ["evil.com", "mail.evil.com"]   # 부모 인정, TLD/공용접미사 기각, 중복 제거
+    rejected = {r["value"] for r in a["_rejected_iocs"]}
+    assert rejected == {"com", "co.kr"}
+
+
+# ─────────────────────────── annotate_attacks ───────────────────────────
+def test_annotate_scopes_and_removes_targets_from_iocs():
+    e = ev(hosts=[WS], ext_ips=["8.8.4.4"])
+    a = {"attacks": [{"actor": "203.0.113.9", "target": "10.0.0.5"},
+                     {"actor": "10.0.0.5", "target": "8.8.4.4", "target_host": "victim.example",
+                      "sample_uri": "victim.example/wp-login.php"}],
+         "iocs": {"c2": ["8.8.4.4", "203.0.113.9"], "delivery": [], "exfil": [],
+                  "domains": ["victim.example", "evil.com"]}}
+    annotate_attacks(a, ctx_for(a, e))
+    assert a["attacks"][0]["actor_scope"] == "external" and a["attacks"][0]["target_scope"] == "internal"
+    assert a["attacks"][1]["actor_scope"] == "internal"
+    assert a["iocs"]["c2"] == ["203.0.113.9"]              # 표적 8.8.4.4 제거, 공격자 보존
+    assert a["iocs"]["domains"] == ["evil.com"]            # 표적 호스트 제거
+    assert len(a["_removed_attack_targets"]) == 2
+
+
+# ─────────────────────────── attach_iocs_from_alerts (카테고리 게이트) ───────────────────────────
+def test_alerts_gate_uses_threat_class_not_severity():
+    e = ev(hosts=[WS], ext_ips=["108.160.1.1", "5.5.5.5"], alerts=[
+        alert("ET FILE_SHARING Dropbox", ["10.0.0.5"], ["108.160.1.1"], "benign", severity=1),
+        alert("ET MALWARE Poweliks CnC", ["10.0.0.5"], ["5.5.5.5"], "threat", severity=1),
+    ])
+    a = {"iocs": {"c2": [], "delivery": [], "exfil": [], "domains": []}}
+    attach_iocs_from_alerts(a, ctx_for(a, e))
+    assert a["iocs"]["c2"] == ["5.5.5.5"]                  # Dropbox sev1 은 승격 안 됨
+    assert a["_iocs_added_from_alerts"] == ["5.5.5.5"]
+
+
+def test_alerts_gate_legacy_evidence_falls_back_to_regex():
+    # threat_class 필드가 없는 구 evidence → 시그니처 정규식 폴백 (동일 결과)
+    e = ev(hosts=[WS], ext_ips=["108.160.1.1", "5.5.5.5"], alerts=[
+        alert("ET CHAT Skype", ["10.0.0.5"], ["108.160.1.1"]),
+        alert("ET TROJAN Zeus Checkin", ["10.0.0.5"], ["5.5.5.5"]),
+    ])
+    assert not _is_threat_alert(e["alerts"][0]) and _is_threat_alert(e["alerts"][1])
+    a = {"iocs": {"c2": [], "delivery": [], "exfil": [], "domains": []}}
+    attach_iocs_from_alerts(a, ctx_for(a, e))
+    assert a["iocs"]["c2"] == ["5.5.5.5"]
+
+
+def test_alerts_excludes_attack_targets_and_dedups():
+    e = ev(hosts=[WS], ext_ips=["5.5.5.5", "6.6.6.6"], alerts=[
+        alert("ET MALWARE X", ["10.0.0.5"], ["5.5.5.5", "6.6.6.6"], "threat")])
+    a = {"attacks": [{"actor": "10.0.0.5", "target": "6.6.6.6"}],
+         "iocs": {"c2": [], "delivery": ["5.5.5.5"], "exfil": [], "domains": []}}
+    attach_iocs_from_alerts(a, ctx_for(a, e))
+    assert a["iocs"]["c2"] == []                            # 6.6.6.6=표적 제외, 5.5.5.5 는 delivery 에 이미 있음
+    assert "_iocs_added_from_alerts" not in a
+
+
+# ─────────────────────────── attach_iocs_from_dns ───────────────────────────
+def test_dns_promotes_suspicious_tld_resolving_to_contacted_ip():
+    e = ev(hosts=[WS, DC], ext_ips=["46.1.1.1"], domains=[
+        ("abc.yjug.gq", ["46.1.1.1"]),          # 의심 TLD + 실제 접속 IP → 승격
+        ("zzz.evil.xyz", ["7.7.7.7"]),          # 의심 TLD 지만 접속 안 함 → 승격 안 함
+        ("www.google.com", ["46.1.1.1"]),       # 정상 TLD → 승격 안 함
+        ("svc.corp.local", ["46.1.1.1"]),       # AD 존 → 제외
+    ])
+    a = {"iocs": {"c2": [], "delivery": [], "exfil": [], "domains": []}}
+    attach_iocs_from_dns(a, ctx_for(a, e))
+    assert a["iocs"]["domains"] == ["abc.yjug.gq"]
+    assert a["iocs"]["c2"] == ["46.1.1.1"]
+
+
+# ─────────────────────────── attach_inbound_threat_ips ───────────────────────────
+def test_inbound_promotes_external_attacker_only_for_threat_alerts():
+    e = ev(hosts=[("192.168.0.2", "server", None)], ext_ips=[], alerts=[
+        alert("ET WEB_SERVER CVE-2014-6271 Attempt", ["146.52.78.242"], ["192.168.0.2"], "threat"),
+        alert("ET CHAT Skype", ["1.1.1.1"], ["192.168.0.2"], "benign"),            # benign 인바운드
+        alert("ET MALWARE Outbound C2", ["192.168.0.2"], ["9.9.9.9"], "threat"),    # 아웃바운드(방향 게이트)
+    ])
+    a = {"iocs": {"c2": [], "delivery": [], "exfil": [], "domains": []}}
+    attach_inbound_threat_ips(a, ctx_for(a, e))
+    assert a["iocs"]["c2"] == ["146.52.78.242"]
+    assert a["_iocs_added_inbound"] == ["146.52.78.242"]
+
+
+# ─────────────────────────── demote_infra_victims ───────────────────────────
+def test_demote_dc_receiving_auth_but_keep_dc_originating_threat():
+    e = ev(hosts=[WS, DC, ("10.0.0.3", "domain_controller", None)], ext_ips=["5.5.5.5"], alerts=[
+        alert("ET MALWARE Beacon", ["10.0.0.3"], ["5.5.5.5"], "threat")])   # DC2 가 외부로 악성 통신
+    a = {"victims": [{"ip": "10.0.0.2", "role": "domain_controller", "status": "compromised", "malware": ["X"]},
+                     {"ip": "10.0.0.3", "role": "domain_controller", "status": "compromised", "malware": ["Y"]},
+                     {"ip": "10.0.0.5", "role": "workstation", "status": "compromised", "malware": ["Z"]}]}
+    demote_infra_victims(a, ctx_for(a, e))
+    st = {v["ip"]: v["status"] for v in a["victims"]}
+    assert st == {"10.0.0.2": "infrastructure", "10.0.0.3": "compromised", "10.0.0.5": "compromised"}
+    assert a["_demoted_infra"] == ["10.0.0.2"]
+
+
+# ─────────────────────────── PASSES 구조 + e2e(코드부만) ───────────────────────────
+def test_passes_promoters_run_after_removers():
+    idx = {f.__name__: i for i, f in enumerate(PASSES)}
+    for remover in ("ground_iocs", "annotate_attacks"):
+        for promoter in ("attach_iocs_from_alerts", "attach_iocs_from_dns", "attach_inbound_threat_ips"):
+            assert idx[remover] < idx[promoter], f"{promoter} 가 {remover} 앞에 있음 — 승격분이 도로 지워진다"
+    assert idx["attach_identity"] < idx["demote_infra_victims"]   # role 확정 뒤에 인프라 판정
+
+
+def test_apply_guards_q2_shape_regression():
+    """q2 실측 모양: LLM 이 광고/구글/페북/환각을 섞어 냈을 때 코드부가 뭘 남기는지 고정."""
+    e = ev(hosts=[("192.168.0.53", "workstation", None), ("192.168.0.2", "server", None)],
+           ext_ips=["88.214.241.199", "31.13.64.1", "46.108.156.146", "108.160.1.1"],
+           domains=[("www.facebook.com", ["31.13.64.1"]), ("uugzv.yjuggczkkq.gq", ["46.108.156.146"]),
+                    ("ad.doubleclick.net", ["1.1.1.1"])],
+           alerts=[alert("ET MALWARE Poweliks Clickfraud CnC M4", ["192.168.0.53"], ["88.214.241.199"], "threat"),
+                   alert("ET FILE_SHARING Dropbox", ["192.168.0.53"], ["108.160.1.1"], "benign"),
+                   alert("ET WEB_SERVER Possible CVE-2014-6271", ["60.250.33.201"], ["192.168.0.2"], "threat")])
+    a = {"victims": [{"ip": "192.168.0.53", "status": "compromised", "malware": ["Poweliks"]}],
+         "attacks": [{"actor": "60.250.33.201", "target": "192.168.0.2"}],
+         "iocs": {"c2": ["88.214.241.199", "192.168.0.2", "9.9.9.9"], "delivery": [],
+                  "exfil": ["31.13.64.1"], "domains": ["ad.doubleclick.net"], "hashes": []}}
+    apply_guards(a, FakeTools(e))
+    assert a["iocs"]["c2"] == ["88.214.241.199", "46.108.156.146", "60.250.33.201"]   # 진짜 C2 + 터널IP + 인바운드 공격자
+    assert "108.160.1.1" not in a["iocs"]["c2"]                                         # Dropbox sev1 미승격
+    assert a["iocs"]["domains"] == ["ad.doubleclick.net", "uugzv.yjuggczkkq.gq"]
+    # 한계를 정직하게 고정: 관측된 광고 도메인·페북 exfil 은 그라운딩이 '존재'만 보므로 코드부는 못 거른다
+    # → 이건 프롬프트(threat_class/baseline 지시) + 향후 precision 채점의 몫. 이 assert 가 깨지면 개선된 것.
+    assert a["iocs"]["exfil"] == ["31.13.64.1"]
+    assert {r["value"] for r in a["_rejected_iocs"]} == {"192.168.0.2", "9.9.9.9"}
+    assert a["victims"][0]["hostname"] == "h0" and a["attacks"][0]["actor_scope"] == "external"
+
+
+# ─────────────────────────── 러너 (pytest 없이) ───────────────────────────
+if __name__ == "__main__":
+    tests = [(k, v) for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
+    failed = []
+    for name, fn in tests:
+        try:
+            fn()
+            print(f"  ok   {name}")
+        except AssertionError as ex:
+            failed.append(name)
+            print(f"  FAIL {name}: {ex}")
+        except Exception as ex:                      # 예외도 실패 — 가드가 크래시하면 리포트가 통째로 죽는다
+            failed.append(name)
+            print(f"  ERR  {name}: {type(ex).__name__}: {ex}")
+    print(f"\n{len(tests) - len(failed)}/{len(tests)} passed" + (f"  — FAILED: {failed}" if failed else ""))
+    sys.exit(1 if failed else 0)

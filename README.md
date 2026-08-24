@@ -47,6 +47,10 @@ LLM(특히 로컬 26~27B)은 IP/도메인/해시를 **베끼다 손상**시키�
 | 내부 자산 / 공격 표적 차단 제외 (자폭 방지) | 타임라인 시나리오, 개요·권고 서술 |
 | 차단 룰 생성 (make_policy) | |
 
+**코드가 아는 답은 시험 전에 준다.** 위협/정황 구분(`threat_class`)은 코드가 evidence 단계에서
+알럿마다 스탬프해 LLM 에게 준다 — 코드가 답을 알면서 모델을 severity 숫자에 속게 두고 뒤에서
+가드로 수습하던 구조(q2 에서 Dropbox/Skype sev1 이 C2 로)를 뿌리에서 끊는다.
+
 또 하나: **차단 룰은 절대 LLM(chat)으로 안 만든다.** 이미 정제된 IOC를 LLM에 다시 주면 재오염되므로,
 `make_policy.py`가 **순수 코드로** iocs를 룰 템플릿에 끼워넣는다.
 
@@ -65,12 +69,14 @@ scripts/
   run_suricata.sh            # pcap → suricata eve.json
   run_zeek.sh                # pcap → zeek NDJSON (네이티브 없으면 docker zeek 폴백)
   extract_log.sh <pcap>      # 위 둘을 한번에 → output/<name>/{suricata,zeek}
-  build_evidence.py <name>   # 로그 → output/<name>/evidence.json (tier1 번들)
+  build_evidence.py <name>   # 로그 → output/<name>/evidence.json (tier1 번들, 알럿마다 threat_class 스탬프)
+  baseline.py                # 결정론 편차 엔진 + threat_class() (시그니처 위협분류의 단일 소스)
   make_policy.py <name>      # reports/<name>.json → reports/<name>.rules (Suricata)
 llm/
-  config.py                  # .env 로더 + REPORT/VERDICT 스키마 + 프롬프트 로드
+  config.py                  # .env 로더(MODEL/NUM_CTX/THINK/샘플링) + REPORT/VERDICT 스키마 + 프롬프트 로드
   tools.py                   # Tools 클래스: evidence.json 을 읽어주는 코드 API
-  run.py                     # 분석 단계: triage → forensic → 코드 안전가드 → reports/<name>.json
+  run.py                     # 분석 단계: triage → forensic → 가드(CaseContext + PASSES) → reports/<name>.json
+  test_guards.py             # 가드 유닛테스트 (LLM/GPU 불필요, 1초) — 노트북이 파이프라인 전에 돌림
   render_report.py           # reports/<name>.json + .rules → reports/<name>.md (한글)
   prompts/
     triage.md                # triage 시스템 프롬프트
@@ -93,7 +99,7 @@ zeek는 네이티브가 없으면 **docker `zeek/zeek:latest`** 로 폴백. 출�
 ### 2) 근거 번들 — `scripts/build_evidence.py <name>`
 로그를 **결정론적으로** 정규화·압축해 `evidence.json` 하나로. **판단(휴리스틱)은 여기서 안 한다.** 주요 필드:
 - `meta` (capture 창, duration, flow 수) · `hosts` (ip/mac/hostname/username/role/ad_domain, first/last_ts)
-- `alerts` (Suricata 시그니처, severity, count, src/dst) · `external` (`ips`/`domains`/`sni`/**`http`**)
+- `alerts` (Suricata 시그니처, severity, **`threat_class`**(threat/rat/benign/unclassified — 코드 분류, 숫자 severity 불신), count, src/dst) · `external` (`ips`/`domains`/`sni`/**`http`**)
 - `files` (해시·mime, 서빙 uid 조인) · `lateral_movement` (dst 역할별 dcerpc_ops/smb_writes)
 - `anomalies` (무시그니처 행동: 비콘 지터, 업로드 비율, no-DNS 직결, odd-port, 역할이탈, DNS 엔트로피)
 
@@ -116,19 +122,35 @@ zeek는 네이티브가 없으면 **docker `zeek/zeek:latest`** 로 폴백. 출�
 
 ---
 
-## `llm/run.py` 상세 — 분석 단계 (네가 처음 짠 것, 많이 바뀜)
+## `llm/run.py` 상세 — 분석 단계
 
-`main()` 흐름: `triage → (사건이면) forensic → 코드 가드 5개 → 저장`.
+`main()` 흐름: `triage → (사건이면) forensic → apply_guards(PASSES) → 저장`. 결과 JSON 에 `pipeline_status`
+(`ok` / `forensic_parse_failed`)가 있어 부분 산출물과 완전 산출물을 채점에서 구분할 수 있다.
 
-| 함수 | 역할 | 소유 |
-|---|---|---|
-| **`triage(tools)`** | 1차 판정 `no_incident`/`suspicious`/`confirmed`. tier1 근거 주입 + `format=VERDICT_SCHEMA` 단일 chat. `no_incident`면 분석 안 감(무혐의를 사건으로 프레이밍하는 것 차단). | LLM |
-| **`forensic(tools)`** | 본 분석. `format=REPORT_SCHEMA` 단일 chat → victims/iocs/timeline/patient_zero/anomaly_analysis/attacks 등 구조화 JSON. | LLM |
-| **`attach_identity(analysis, tools)`** | victims 의 `mac/hostname/username` 을 evidence 조인으로 **코드가 확정**(LLM 베끼기 손상·누락 교정). `clean_ip`가 구분자 손상 IP(`10.6_15.187`) 를 숫자 재조립+호스트 검증으로 복구, `patient_zero`도 IP만 정규화. | 코드 |
-| **`attach_hashes(analysis, tools)`** | `iocs.hashes` 를 evidence `files[]` 에서 코드가 채움(LLM 해시 블라인드니스 방지). windowsupdate 등 **업데이트 인프라가 서빙한 x-dosexec 은 오탐이라 제외**(`_excluded_benign_hashes`). | 코드 |
-| **`ground_iocs(analysis, tools)`** | iocs 의 IP/도메인을 **evidence 관측집합과 대조** — 없으면 오염/환각으로 제거. `host_of`가 LLM 장식(`"1.2.3.4 (Beacon)"`)·URL·JSON누출에서 알맹이만 추출, 버킷 오배치 도메인 salvage, **내부 자산(호스트 IP·AD 존)·TLD·공용접미사 기각**. 제거분 `_rejected_iocs`. | 코드 |
-| **`annotate_attacks(analysis, tools)`** | `attacks[]` 의 `actor_scope`/`target_scope`(내부/외부)를 호스트 인벤토리로 채움 → 차단 반응 분기(내부 actor=호스트격리 / 외부=IP차단 / 표적=차단안함). 표적(피격자)을 iocs 에서 제거(자폭 방지). `_removed_attack_targets`. | 코드 |
-| **`attach_iocs_from_alerts(analysis, tools)`** | (가드 5개 중 마지막) severity 1 alert 가 가리키는 외부 관측 IP 를 `iocs.c2` 에 코드가 보장(LLM 이 근거엔 C2 써놓고 iocs 는 비우는 문제 대응). 공격 표적 IP 는 제외. ⚠️ 이 룰셋에선 ET INFO/CHAT/FILE_SHARING(Dropbox·Skype 등)도 severity 1 이라 정상 CDN 이 c2 에 들어감 — make_policy `_is_cdn` 이 Cloudflare/Fastly 대역만 되거르고 Dropbox/Google 등은 못 거른다("알려진 한계" 2·CDN 참조). | 코드 |
+**LLM 호출 (판단)** — 둘 다 tier1 근거 주입 + `format=` 스키마 강제 단일 chat, `think=THINK`(.env):
+
+| 함수 | 역할 |
+|---|---|
+| `triage(tools)` | 1차 판정 `no_incident`/`suspicious`/`confirmed`. `no_incident`면 분석 안 감(무혐의를 사건으로 프레이밍하는 것 차단). |
+| `forensic(tools)` | 본 분석 → victims/iocs/timeline/patient_zero/attacks 등 구조화 JSON. |
+
+**코드 가드 (팩트)** — `CaseContext` 가 케이스의 집합 장부(내부IP·AD존·외부관측IP·공격표적·그라운딩 기준집합)를
+**한 번만** 계산해 모든 가드에 공유한다(전엔 가드 8개가 각자 복붙 계산 — 판정 기준을 바꾸면 8곳을 고쳐야 했다).
+가드는 `PASSES` 리스트 순서대로 돈다 — **순서가 곧 규칙**: 정리/제거 구간이 끝난 뒤 승격 구간.
+
+| PASSES 순서 | 역할 |
+|---|---|
+| `attach_identity` | victims 의 mac/hostname/username/role 을 evidence 조인으로 코드가 확정. 구분자 손상 IP(`10.6_15.187`) 재조립, 장식 제거. |
+| `demote_infra_victims` | 정상 AD 인증을 받는 DC/DNS 를 `compromised`→`infrastructure` (격리 자폭 방지). 위협 alert 의 출발지인 DC 는 그대로 둠. |
+| `attach_hashes` | `iocs.hashes` 를 evidence files 에서 코드가 채움. 업데이트 인프라 서빙 실행파일은 제외(`_excluded_benign_hashes`). |
+| `ground_iocs` | iocs 의 IP/도메인을 관측집합과 대조 — 미관측(환각)·내부 자산·TLD 기각, 버킷 오배치 도메인 salvage. `_rejected_iocs`. |
+| `annotate_attacks` | attacks 의 actor/target scope 확정, 표적(피격자)을 iocs 에서 제거. `_removed_attack_targets`. |
+| ── 승격 구간 ── | (제거 뒤여야 승격분이 도로 안 지워짐) |
+| `attach_iocs_from_alerts` | `threat_class` 가 threat/rat 인 alert 의 외부 관측 IP → c2. benign(Dropbox/Skype sev1)은 승격 안 됨. |
+| `attach_iocs_from_dns` | 의심 TLD(.gq/.cc/.xyz…) 도메인 중 피해자가 실제 접속한 IP 로 해석된 것 + 그 IP 승격 (HTTPS-only 후속 C2). |
+| `attach_inbound_threat_ips` | 인바운드 위협 alert 의 외부 출발지(우리 서버를 때리는 공격자) → c2. |
+
+새 가드 추가 = 함수 하나(`(analysis, ctx)`) + `PASSES` 에서 자리 정하기 + `test_guards.py` 에 케이스 하나.
 
 > 왜 가드가 이렇게 많나: 로컬 SLM이 팩트를 계속 망쳐서, **매 실패 지점을 코드로 하나씩 받아낸** 결과.
 > 그래서 모델을 바꿔도(gemma↔qwen) 팩트는 안 흔들리고 **판단 품질 차이만 드러난다.**
@@ -144,7 +166,7 @@ zeek는 네이티브가 없으면 **docker `zeek/zeek:latest`** 로 폴백. 출�
 |---|---|
 | `get_meta()` | capture 창/duration/flow 수 (짧은 캡처면 비콘 휴리스틱 불신용) |
 | `get_hosts_info()` | 전 호스트 ip/mac/hostname/username/role/ad_domain + 활동창 |
-| `get_alerts()` | Suricata 알럿 전량(시그니처/severity/count/src/dst) |
+| `get_alerts()` | Suricata 알럿 전량(시그니처/severity/**threat_class**/count/src/dst) — 모델은 severity 가 아니라 threat_class 로 위협을 가른다 |
 | `get_external()` | **알럿에 엮인** 외부 ip/도메인 + sni (배경 CDN/텔레메트리 노이즈 제거) |
 | `get_http()` | 웹 요청 전량(method/url/uri/status/UA) — **무필터**(웹공격은 alert 없어도 URI에 있음) |
 | `get_files()` | 멀웨어 후보 파일(실행/압축/스크립트)은 전문, 나머지는 mime별 요약 |
@@ -152,10 +174,9 @@ zeek는 네이티브가 없으면 **docker `zeek/zeek:latest`** 로 폴백. 출�
 | `get_anomalies()` | 무시그니처 행동 측정치(비콘/업로드비율/no-dns/odd-port/역할이탈/DNS엔트로피) |
 | `get_signals()` | RPC 기법 라벨·zeek weird·프로토콜 요약·존재 로그 목록 |
 
-> ⚠️ **`get_external()` 필터 한계**: "알럿에 엮인 IP만 통과" 규칙은 `ET INFO`/`ET CHAT`/`FILE_SHARING`
-> (Dropbox·Skype·"PE EXE download") 같은 양성-정보 알럿이 참조하는 IP도 통과시킨다 → 정상 CDN이 C2 후보로 올라간다.
-> 반대로 알럿이 없는 IOC(DGA 도메인, 애드웨어)는 `background_domains` 로 빠진다.
-> 고침 방향: 알럿 카테고리/severity 게이팅(`ET MALWARE`/`TROJAN`/`EXPLOIT` 만 IP 승격). → "알려진 한계" 참조.
+> ⚠️ **`get_external()` 필터 한계**: "알럿에 엮인 IP만 통과" 규칙은 benign 알럿(Dropbox·Skype)이 참조하는 IP도
+> 통과시킨다 — 다만 이제 각 알럿에 `threat_class` 가 붙어 모델이 구분할 수 있고, 코드 승격기는 threat/rat 만 올린다.
+> 반대로 알럿이 없는 IOC(DGA 도메인, 애드웨어)는 `background_domains` 로 빠진다(의심 TLD 는 `attach_iocs_from_dns` 가 구제).
 
 **(B) 코드 전용 헬퍼 — 가드가 쓰는 것들 (LLM 미노출)**
 | 메서드 | 용도 |
@@ -169,7 +190,7 @@ zeek는 네이티브가 없으면 **docker `zeek/zeek:latest`** 로 폴백. 출�
 ---
 
 ## `llm/config.py` — 설정 단일 소스
-리포 루트 `.env` 를 읽어 노출: `MODEL`, `NUM_CTX`, `OPTS`(temperature/seed/num_ctx), `VERDICT_SCHEMA`,
+리포 루트 `.env` 를 읽어 노출: `MODEL`, `NUM_CTX`, `THINK`(추론 모드 on/off), `OPTS`(temperature/top_p/seed/num_ctx), `VERDICT_SCHEMA`,
 `REPORT_SCHEMA`(둘 다 ollama `format` 강제용), `SYSTEM_PROMPT_TRIAGE/FORENSIC`(=`prompts/*.md`).
 **프롬프트는 코드 아니라 `.md` 파일**, **설정은 `.env` 한 줄** — 코드 안 건드리고 튜닝.
 
@@ -182,6 +203,7 @@ zeek는 네이티브가 없으면 **docker `zeek/zeek:latest`** 로 폴백. 출�
 ./setup.sh                                       # 최초 1회
 ./scripts/extract_log.sh pcaps/<파일>.pcap        # → output/<name>/{suricata,zeek}
 python3 scripts/build_evidence.py <name>          # → output/<name>/evidence.json
+cd llm && python3 test_guards.py                  # 가드 유닛테스트 (ollama 불필요, 1초)
 cd llm && python3 run.py <name>                   # → reports/<name>.json   (ollama 필요)
 cd .. && python3 scripts/make_policy.py <name> --validate   # → reports/<name>.rules
 cd llm && python3 render_report.py <name>         # → reports/<name>.md
@@ -204,6 +226,15 @@ llama.cpp 그래머라 대부분 모델 가능.
 - 후보: `gemma3:27b`, `mistral-small3.2:24b`, `phi4:14b`(빠름). 70B·qwen/deepseek 제외.
 - 안 뜨면(OOM) `.env` `NUM_CTX` 낮추기.
 
+**qwen3.8:27b (현재, `-mtp-q4_K_M` 태그)**: 동급 오픈웨이트 1위(AA Index 52)인데 **추론(thinking) 켠 점수**다.
+- `.env THINK=true` 가 기본. 끄면 광고를 IOC 로, Shellshock 서사 증발 같은 판단 실패(q2 실측). ollama 는 모델
+  템플릿을 제네릭으로 갈아끼워 `reasoning_effort`(low/medium)를 못 넘기므로 선택지는 켬(xhigh)/끔 뿐 —
+  medium 이 필요하면 llama-server `--jinja` 이식이 필요(파이프라인 근간 변경, 마지막 수단).
+- ollama 버그 이력: think=false 면 `format` 스키마가 조용히 무시됨(#14645/#15260). 노트북 진단 셀이 매 세션
+  `format 강제 OK` 를 확인한다.
+- 샘플링은 모델카드 권장(thinking 1.0/0.95). MTP 는 무손실(메인 모델 검증)이라 품질 요인 아님.
+- T4 16GB×2 에 18GB + 65k KV 를 넣으려면 KV 양자화 필수 — 노트북 `KV_TYPE`(q8_0 기본, 스필 시 q4_0).
+
 **비교법**: 같은 pcap 세트로 각 모델을 돌려 결과를 나란히 비교. 코드가 팩트를 받쳐서 **판단 품질만 순수 비교**됨.
 
 ---
@@ -223,7 +254,10 @@ llama.cpp 그래머라 대부분 모델 가능.
 
 **2026-07-09 q1/q2 에서 확인 (코드로 해결 가능):**
 1. **성공/시도 미구분** — 인바운드 웹 익스플로잇이 4xx 응답 + 콜백 부재면 실패인데, 모델은 sev1 알럿만 보고 `confirmed`·`compromised`로 판정. → http.log 응답코드 + conn.log 콜백유무를 코드가 확인해 "시도(실패)" 판정, 그 호스트에 confirmed 금지.
-2. **정상 CDN을 C2로** — `get_external` 필터 한계(위 ⚠️). q1 IOC 20개 모두 정상 CDN, q2 11개 중 88.214.241.199 하나만 진짜. → 알럿 카테고리/severity 게이팅.
+2. **정상 CDN/광고를 IOC로** — (코드 승격기 쪽은 해결) `threat_class` 게이트로 Dropbox/Skype sev1 이 c2 에 안 들어간다.
+   (LLM 쪽은 남음) 모델이 직접 iocs 에 넣은 **관측된** 광고 도메인·구글/페북 exfil 은 `ground_iocs` 가 '존재'만 대조하므로 통과한다
+   (q2: 도메인 28개 중 25개가 광고, exfil 3개가 페북/구글). 프롬프트에 threat_class/baseline 지시를 넣었고, 남은 건
+   **score.py 에 precision(iocP/domP) 추가** — 지금 채점표는 recall 뿐이라 과차단이 어느 숫자에도 안 잡힌다.
 3. **tier1 컨텍스트 초과** — http body로 tier1 비대(q2 ≈ 65k 토큰, NUM_CTX 한계). body 바이트의 99%가 응답 body이고 300행이 방향 무관하게 다 싣는 것이 원인. → 방향 기반 body 예산(내부 서버로 온 요청은 body/헤더 전량, 외부에서 받은 응답은 지문만). 인코딩은 코드가 먼저 디코드(base64/url/gzip) 후 판단.
 4. **근거(grounds) 영어** — `forensic.md` 가 한글을 강제하는 필드가 `timeline.event`/`assessment` 둘뿐 → `grounds` 는 영어 evidence를 미러링. → 한글 강제 목록에 `grounds` 추가.
 

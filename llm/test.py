@@ -3,9 +3,10 @@ from ollama import chat, ChatResponse
 
 from test_tools import TOOLS, AVAILABLE
 
-MODEL = "gemma4:26b"
+from config import MODEL, THINK   # .env 단일 소스 — 하드코딩하면 setup 스모크가 옛 모델을 검사한다
 
 def test_hello():
+    print(f"[test] model={MODEL} think={THINK}")
     response: ChatResponse = chat(model=MODEL, messages=[
         {"role": "user", "content": "안녕하세요? 당신은 누구입니까?"}
     ])
@@ -18,7 +19,7 @@ def test_tool_call():
         "content": "테스트용 툴 돌려줘. arg1엔 나한테 하고 싶은 말을 한 단어로 넣어줘.",
     }]
     # 함수 객체를 그대로 넘김 → ollama 가 타입힌트+docstring 으로 스키마 자동 생성
-    response: ChatResponse = chat(model=MODEL, messages=messages, think=False, tools=TOOLS)
+    response: ChatResponse = chat(model=MODEL, messages=messages, think=THINK, tools=TOOLS)
 
     print("tool_calls:", response.message.tool_calls)
 
