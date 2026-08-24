@@ -171,12 +171,15 @@ def test_alerts_gate_legacy_evidence_falls_back_to_regex():
 
 
 def test_alerts_excludes_attack_targets_and_dedups():
+    # 표적 제외는 '공격 카테고리(WEB_SERVER 등)' alert 의 dst 에만 적용된다 — 멀웨어-통신
+    # (MALWARE/CNC) alert 의 dst 는 C2 라서 표적 오기여도 보호됨(test_c2_mislabeled... 참조).
     e = ev(hosts=[WS], ext_ips=["5.5.5.5", "6.6.6.6"], alerts=[
-        alert("ET MALWARE X", ["10.0.0.5"], ["5.5.5.5", "6.6.6.6"], "threat")])
+        alert("ET MALWARE X", ["10.0.0.5"], ["5.5.5.5"], "threat"),
+        alert("ET WEB_SERVER SQL Injection", ["10.0.0.5"], ["6.6.6.6"], "threat")])
     a = {"attacks": [{"actor": "10.0.0.5", "target": "6.6.6.6"}],
          "iocs": {"c2": [], "delivery": ["5.5.5.5"], "exfil": [], "domains": []}}
     attach_iocs_from_alerts(a, ctx_for(a, e))
-    assert a["iocs"]["c2"] == []                            # 6.6.6.6=표적 제외, 5.5.5.5 는 delivery 에 이미 있음
+    assert a["iocs"]["c2"] == []                            # 6.6.6.6=피격자 제외 유지, 5.5.5.5 는 delivery 에 이미 있음
     assert "_iocs_added_from_alerts" not in a
 
 
@@ -254,6 +257,53 @@ def test_apply_guards_q2_shape_regression():
 
 
 # ─────────────────────────── 러너 (pytest 없이) ───────────────────────────
+# ─────────────── C2 표적-보호 예외 + 코드 triage/승급 ───────────────
+def test_c2_mislabeled_as_target_survives():
+    """LLM 이 C2 통신을 attacks[].target 에 적어도, 멀웨어-통신 alert 가 가리키는 IP 는
+    표적 제거에 안 지워지고 승격기가 c2 로 보장한다 (2024-07-30 STRRAT 실전 결함 회귀)."""
+    e = ev(hosts=[WS], ext_ips=["5.252.153.241"],
+           alerts=[alert("ET MALWARE Fake Microsoft Teams CnC Payload Request (GET)",
+                         ["10.0.0.5"], ["5.252.153.241"], "threat")])
+    a = {"victims": [], "attacks": [{"actor": "10.0.0.5", "target": "5.252.153.241"}],
+         "iocs": {"c2": ["5.252.153.241"], "delivery": [], "exfil": [], "domains": [], "hashes": []}}
+    run.apply_guards(a, FakeTools(e))
+    assert "5.252.153.241" in a["iocs"]["c2"], a
+    assert a.get("_c2_kept_despite_target_label") == ["5.252.153.241"]
+    assert not any(r["value"] == "5.252.153.241" for r in a.get("_removed_attack_targets", []))
+
+
+def test_real_outbound_attack_victim_still_removed():
+    """자폭 방지 원칙 유지: WEB_SERVER 류 alert 의 dst(진짜 피격자)는 여전히 표적으로 제거되고
+    승격기도 되살리지 않는다."""
+    e = ev(hosts=[WS], ext_ips=["203.0.113.9"],
+           alerts=[alert("ET WEB_SERVER Possible SQL Injection", ["10.0.0.5"], ["203.0.113.9"], "threat")])
+    a = {"victims": [], "attacks": [{"actor": "10.0.0.5", "target": "203.0.113.9"}],
+         "iocs": {"c2": ["203.0.113.9"], "delivery": [], "exfil": [], "domains": [], "hashes": []}}
+    run.apply_guards(a, FakeTools(e))
+    assert a["iocs"]["c2"] == [], a
+
+
+def test_code_triage_skips_llm_on_threat_signal():
+    e = ev(hosts=[WS], alerts=[alert("ET MALWARE Zeus Checkin", ["10.0.0.5"], ["9.9.9.9"], "threat")])
+    r = run.code_triage(FakeTools(e))
+    assert r and r["verdict"] == "suspicious" and "생략" in r["grounds"][0]
+
+
+def test_code_triage_defers_quiet_capture_to_llm():
+    e = ev(hosts=[WS], alerts=[alert("ET CHAT Skype", ["10.0.0.5"], ["9.9.9.9"], "benign")])
+    assert run.code_triage(FakeTools(e)) is None    # benign 뿐이면 LLM 판단으로
+
+
+def test_upgrade_verdict_deterministic():
+    out = {"verdict": "suspicious", "grounds": []}
+    run.upgrade_verdict(out, {"victims": [{"ip": "10.0.0.5", "status": "compromised"}],
+                              "iocs": {"c2": ["9.9.9.9"]}})
+    assert out["verdict"] == "confirmed" and "코드 승급" in out["grounds"][-1]
+    out2 = {"verdict": "suspicious", "grounds": []}
+    run.upgrade_verdict(out2, {"victims": [], "iocs": {"c2": ["9.9.9.9"]}})
+    assert out2["verdict"] == "suspicious"          # 침해 확정 호스트 없으면 승급 안 함
+
+
 if __name__ == "__main__":
     tests = [(k, v) for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = []

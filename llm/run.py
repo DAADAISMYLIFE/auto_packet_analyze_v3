@@ -1,6 +1,6 @@
-import sys, json, re, os
+import sys, json, re, os, time
 
-from tools import Tools, compact_evidence, is_threat_alert
+from tools import Tools, compact_evidence, is_threat_alert, is_malware_comm_alert
 from config import (MODEL, OPTS, THINK, NUM_CTX, VERDICT_SCHEMA, REPORT_SCHEMA,
                     SYSTEM_PROMPT_TRIAGE, SYSTEM_PROMPT_FORENSIC)
 # ollama 는 LLM 호출 함수 안에서 지연 import — 가드(코드 소유 후처리)는 ollama 없이도
@@ -74,17 +74,28 @@ def _tier1(tools, mode="forensic"):
     return text
 
 
-def _chat(**kw):
-    """ollama chat 래퍼 — 서버 에러를 LLMError 로 바꿔 main 이 보고서에 기록하게 한다."""
+def _chat(stage, **kw):
+    """ollama chat 래퍼 — (1) 서버 에러를 LLMError 로 (main 이 보고서에 기록), (2) prefill/decode
+    실측을 찍는다. '15분이 어디로 가는가'를 감이 아니라 숫자로 — 사고 토큰은 decode 에 포함되므로
+    decode 가 크면 사고가 범인, prefill 이 크면 evidence 크기가 범인이다."""
     from ollama import chat
+    t0 = time.time()
     try:
-        return chat(**kw)
+        res = chat(**kw)
     except Exception as ex:                           # ResponseError(500 등)·연결 실패 모두
         raise LLMError(f"{type(ex).__name__}: {ex}") from ex
+    pe = getattr(res, "prompt_eval_count", 0) or 0
+    ped = ((getattr(res, "prompt_eval_duration", 0) or 0) / 1e9) or 1e-9
+    ec = getattr(res, "eval_count", 0) or 0
+    ed = ((getattr(res, "eval_duration", 0) or 0) / 1e9) or 1e-9
+    think_chars = len(getattr(res.message, "thinking", None) or "")
+    print(f"[llm:{stage}] {time.time() - t0:.0f}s — prefill {pe:,}tok/{ped:.0f}s({pe / ped:.0f}tok/s)"
+          f" decode {ec:,}tok/{ed:.0f}s({ec / ed:.1f}tok/s) thinking {think_chars:,}자")
+    return res
 
 
 def triage(tools):
-    res = _chat(model=MODEL, format=VERDICT_SCHEMA,   # ← format 이 강제 선택
+    res = _chat("triage", model=MODEL, format=VERDICT_SCHEMA,   # ← format 이 강제 선택
                think=THINK,                            # .env THINK — qwen3.8 은 추론이 본체(끄면 판단력 급감)
                messages=[{"role": "system", "content": SYSTEM_PROMPT_TRIAGE},
                          {"role": "user", "content": "Triage this capture.\n\n# Tier-1 Evidence\n" + _tier1(tools, "triage")}],
@@ -119,7 +130,7 @@ def forensic(tools):
              "- alerts 의 threat_class: `threat`/`rat` 만 위협이다. `benign`(INFO/CHAT/"
              "FILE_SHARING) 은 severity 1 이어도 위협이 아니다 — 그 IP/도메인을 iocs 에 넣지 마라.\n"
              "- 그 다음 alerts/external/http 등 raw 로 세부를 확인하라.\n\n")
-    res = _chat(model=MODEL, format=REPORT_SCHEMA, think=THINK,
+    res = _chat("forensic", model=MODEL, format=REPORT_SCHEMA, think=THINK,
                messages=[{"role": "system", "content": SYSTEM_PROMPT_FORENSIC},
                          {"role": "user",
                           "content": "Analyze this incident and return the structured JSON.\n\n"
@@ -159,11 +170,24 @@ class CaseContext:
         # 외부 관측 IP (아웃바운드 dst 집계) — 인바운드 공격자는 여기 없고 alert src 로만 등장
         self.external_ips = {str(x.get("ip")).lower()
                              for x in ev.get("external", {}).get("ips", []) if x.get("ip")}
+        # 멀웨어-통신 alert(MALWARE/CNC/RAT…)가 가리키는 외부 IP = 악성 인프라 확정.
+        #   LLM 이 C2 통신을 attacks[].target 에 적으면 '피격자 제거'가 C2 를 지우고 승격기까지
+        #   막아 차단정책이 통째로 비는 실전 결함(2021-06-16·2024-07-30·2025-01-22 실증).
+        #   시그니처 카테고리(결정론)로 표적 취급에서 보호한다 — WEB_SERVER/EXPLOIT/SCAN 류의
+        #   dst(아웃바운드 공격의 진짜 피격자)는 보호하지 않아 자폭 방지 원칙은 유지된다.
+        self.c2_flagged = set()
+        for a in ev.get("alerts", []):
+            if not is_malware_comm_alert(a):
+                continue
+            for ip in (a.get("src_ips") or []) + (a.get("dst_ips") or []):
+                si = str(ip).lower()
+                if si not in self.internal_ips:
+                    self.c2_flagged.add(si)
         # 공격 표적(피격자) IP — IOC 가 아니다. 승격기가 이걸 c2 로 되살리면 '피해자를 차단'하는 자폭.
         self.attack_targets = set()
         for t in (analysis.get("attacks") or []):
             m = _IPV4.search(str(t.get("target") or ""))
-            if m:
+            if m and m.group(0).lower() not in self.c2_flagged:   # C2 오기(誤記) 보호
                 self.attack_targets.add(m.group(0).lower())
         # 그라운딩 기준집합 = evidence 의 '외부 관측' IP/도메인/해시 (내부 자산 원천 제외)
         self.observed = tools.observed_iocs()
@@ -360,12 +384,16 @@ def annotate_attacks(analysis, ctx):
             return "unknown"
         return "internal" if str(ip).lower() in ctx.internal_ips else "external"
 
-    targets, thosts = set(), set()
+    targets, thosts, c2_protected = set(), set(), set()
     for a in attacks:
         a["actor_scope"] = scope(a.get("actor"))       # 코드가 확정 (LLM 값 덮어씀)
         a["target_scope"] = scope(a.get("target"))
         if a.get("target"):
-            targets.add(str(a["target"]).lower())
+            t = str(a["target"]).lower()
+            if t in ctx.c2_flagged:                    # 멀웨어-통신 alert 가 가리키는 IP = C2 (표적 오기 보호)
+                c2_protected.add(t)
+            else:
+                targets.add(t)
         # 표적 도메인은 attack 레코드가 이미 안다 → target_host + sample_uri 의 host
         th = str(a.get("target_host") or "").lower()
         if th and th != "unknown":
@@ -399,6 +427,8 @@ def annotate_attacks(analysis, ctx):
     iocs["domains"] = kept_doms
     if removed:
         analysis["_removed_attack_targets"] = removed
+    if c2_protected:
+        analysis["_c2_kept_despite_target_label"] = sorted(c2_protected)
 
 
 def _add_to_bucket(analysis, bucket, values, tag):
@@ -517,6 +547,40 @@ def apply_guards(analysis, tools):
     return analysis
 
 
+def code_triage(tools):
+    """코드가 답을 아는 triage — threat/rat alert 나 멀웨어 후보 해시가 있으면 '사건 아님'일 수는
+    없다(결정론적 사실). 3지선다에 LLM 사고 토큰(호출당 수 분)을 태우지 않고 생략한다.
+    verdict 는 suspicious 바닥 — 확정 승급은 forensic+가드 뒤 upgrade_verdict(역시 코드)가 한다.
+    조용한 캡처(신호 없음)만 LLM triage 로 간다 — no_incident 야말로 판단이 필요한 곳이므로."""
+    reasons = []
+    threat = [a for a in tools.evidence.get("alerts", []) if is_threat_alert(a)]
+    if threat:
+        reasons.append(f"위협 카테고리 alert {len(threat)}종 — 예: {(threat[0].get('signature') or '')[:60]}")
+    mal = tools.malware_candidate_hashes()["malware"]
+    if mal:
+        reasons.append(f"멀웨어 후보 해시 {len(mal)}개 (업데이트 인프라 서빙분 제외 후)")
+    if not reasons:
+        return None
+    print(f"[triage] 코드 판정 — LLM triage 생략: {reasons[0]}")
+    return {"verdict": "suspicious",
+            "grounds": ["[코드 판정 — LLM triage 생략] " + r for r in reasons]}
+
+
+def upgrade_verdict(out, analysis):
+    """suspicious → confirmed 승급 (결정론): 가드를 전부 통과한 최종 분석에 '침해 확정 호스트'와
+    'IOC(c2 또는 해시)'가 함께 남아 있으면 사건은 확정이다. code_triage 의 바닥값 보정이자,
+    LLM triage 가 소심하게 suspicious 로 남긴 것(2024-11-26 NetSupport 실증)의 교정."""
+    if out.get("verdict") != "suspicious" or not analysis:
+        return
+    compromised = [v for v in analysis.get("victims", []) if v.get("status") == "compromised"]
+    iocs = analysis.get("iocs", {})
+    if compromised and (iocs.get("c2") or iocs.get("hashes")):
+        out["verdict"] = "confirmed"
+        out["grounds"].append(f"[코드 승급] 침해 확정 호스트 {len(compromised)}대 + "
+                              f"c2 {len(iocs.get('c2') or [])}건/해시 {len(iocs.get('hashes') or [])}건 "
+                              f"— suspicious → confirmed")
+
+
 def main():
     # 1. 매개변수로 어떤 evidence파일인지 입력 받기
     if len(sys.argv) < 2:
@@ -542,10 +606,12 @@ def main():
         print(f"[main] {stage} 실패 — {err}\n[report] 실패 기록 → {path}")
         sys.exit(1)
 
-    try:
-        res = triage(tools)
-    except LLMError as ex:
-        fail("triage", ex)
+    res = code_triage(tools)          # 코드가 답을 아는 경우 LLM triage 생략 (사고 토큰 수 분 절약)
+    if res is None:
+        try:
+            res = triage(tools)
+        except LLMError as ex:
+            fail("triage", ex)
     out = {"verdict": res["verdict"], "grounds": res.get("grounds", []),
            "pipeline_status": "ok"}          # 부분 산출물(파싱 실패)과 완전 산출물을 구분
 
@@ -562,6 +628,7 @@ def main():
             fail("forensic", ex)
         if analysis:
             apply_guards(analysis, tools)
+            upgrade_verdict(out, analysis)   # 결정론 승급 (suspicious 바닥 → confirmed)
             out["analysis"] = analysis
             print(json.dumps(analysis, ensure_ascii=False, indent=2))
         else:

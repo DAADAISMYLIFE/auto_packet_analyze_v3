@@ -52,15 +52,28 @@ def narrative(analysis):
         return {"overview_ko": f"(LLM 미가용 — 스텁) 영문 요약: {summ}",
                 "scenario_ko": "(LLM 미가용 — 스텁) 타임라인 표 참조.",
                 "recommendation_ko": "(LLM 미가용 — 스텁) 아래 차단 정책을 검토 후 적용 여부를 선택하십시오."}
-    from config import MODEL, OPTS, THINK
-    res = chat(model=MODEL, format=NARRATIVE_SCHEMA, think=THINK,   # .env THINK 단일 소스
-               messages=[{"role": "system", "content": NARR_PROMPT},
-                         {"role": "user", "content": json.dumps(analysis, ensure_ascii=False, default=str)}],
-               options=OPTS)
-    try:
-        return json.loads(res.message.content)
-    except (json.JSONDecodeError, TypeError):
-        return {"overview_ko": "", "scenario_ko": "", "recommendation_ko": ""}
+    from config import MODEL, OPTS, THINK_NARRATIVE
+    import time
+
+    def call(think):
+        t0 = time.time()
+        res = chat(model=MODEL, format=NARRATIVE_SCHEMA, think=think,
+                   messages=[{"role": "system", "content": NARR_PROMPT},
+                             {"role": "user", "content": json.dumps(analysis, ensure_ascii=False, default=str)}],
+                   options=OPTS)
+        print(f"[narrative] think={think} {time.time() - t0:.0f}s")
+        try:
+            return json.loads(res.message.content)
+        except (json.JSONDecodeError, TypeError):
+            return None
+
+    # 서술은 사고 없이(기본) — 이미 끝난 분석의 한글 요약이라 판단이 아니다. 단 ollama 일부 버전은
+    # think=false 에서 format 을 조용히 무시(#14645) → 파싱 실패 시 think=true 로 1회 자동 재시도.
+    n = call(THINK_NARRATIVE)
+    if n is None and not THINK_NARRATIVE:
+        print("[narrative] think=False 파싱 실패 (ollama format 버그 가능성) — think=True 재시도")
+        n = call(True)
+    return n or {"overview_ko": "", "scenario_ko": "", "recommendation_ko": ""}
 
 
 def render(name, report, rules_text):

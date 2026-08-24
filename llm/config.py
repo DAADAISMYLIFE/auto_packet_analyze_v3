@@ -42,6 +42,8 @@ SEED = int(os.environ.get("SEED", "42"))
 #   주의: ollama 는 think=false 일 때 format(스키마 강제)을 조용히 무시하는 버그 이력이 있다
 #   (ollama #14645/#15260) — 끌 때는 노트북의 format 강제 진단을 반드시 확인.
 THINK = os.environ.get("THINK", "true").strip().lower() in ("1", "true", "yes", "on")
+# 서술(render_report) 전용 — 3문장 요약엔 xhigh 사고가 낭비(호출당 수 분).
+THINK_NARRATIVE = os.environ.get("THINK_NARRATIVE", "false").strip().lower() in ("1", "true", "yes", "on")
 
 # ollama chat 에 그대로 넘기는 옵션
 OPTS = {"temperature": TEMPERATURE, "top_p": TOP_P, "seed": SEED, "num_ctx": NUM_CTX}

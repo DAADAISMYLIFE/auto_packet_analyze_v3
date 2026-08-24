@@ -27,6 +27,18 @@ def is_threat_alert(a):
     return bool(_THREAT_SIG.search(a.get("signature") or ""))
 
 
+# 멀웨어-통신 계열 카테고리 — 이 alert 가 가리키는 '외부' IP 는 공격당한 피해자가 아니라
+# 악성 인프라(C2/RAT/봇넷)다. WEB_SERVER/EXPLOIT/SCAN 등 '서버를 공격' 카테고리는 제외 —
+# 그 dst 는 진짜 피격자일 수 있다. (annotate_attacks 표적 제거의 예외 판단용, 결정론)
+_MALWARE_COMM_SIG = re.compile(
+    r"\b(MALWARE|TROJAN|CNC|BOTNET|COINMINER|CURRENT_EVENTS|PHISHING|"
+    r"MOBILE_MALWARE|WORM|ROOTKIT|REMOTE_ACCESS)\b", re.I)
+
+
+def is_malware_comm_alert(a):
+    return bool(_MALWARE_COMM_SIG.search(a.get("signature") or ""))
+
+
 class Tools:
     # ── LLM 뷰 강등 단계 (http). evidence.json 은 무손실 — 줄이는 건 '보여주는 것'뿐 ──
     #   0 전량(= get_http, 예산 안이면 오늘과 동일)  1 신호없는 행 응답/헤더 지문
