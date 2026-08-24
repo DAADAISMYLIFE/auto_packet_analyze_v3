@@ -1,7 +1,7 @@
 import sys, json, re, os
 
 from tools import Tools, compact_evidence
-from config import (MODEL, OPTS, THINK, VERDICT_SCHEMA, REPORT_SCHEMA,
+from config import (MODEL, OPTS, THINK, NUM_CTX, VERDICT_SCHEMA, REPORT_SCHEMA,
                     SYSTEM_PROMPT_TRIAGE, SYSTEM_PROMPT_FORENSIC)
 # ollama 는 LLM 호출 함수 안에서 지연 import — 가드(코드 소유 후처리)는 ollama 없이도
 # 로드/테스트 가능해야 한다 (test_guards.py 가 로컬 CPU 에서 돈다).
@@ -36,9 +36,20 @@ def _is_threat_alert(a):
     return bool(_THREAT_SIG.search(a.get("signature") or ""))
 
 
+CHARS_PER_TOKEN = 3.3   # JSON/영문 기준 보수적 추정 (한글 섞이면 더 적음)
+
+
+class LLMError(RuntimeError):
+    """ollama 호출 자체가 실패 (컨텍스트 초과·서버 다운 등). 파싱 실패와 구분."""
+
+
 def _tier1(tools):
-    """LLM 에 주입하는 tier1 근거 번들 (triage/forensic 공통). compact_evidence = 무손실 표 압축."""
-    return json.dumps(compact_evidence({
+    """LLM 에 주입하는 tier1 근거 번들 (triage/forensic 공통). compact_evidence = 무손실 표 압축.
+
+    크기를 NUM_CTX 와 대조해 찍는다 — ollama 는 컨텍스트에 안 들어가는 user 메시지를 '잘라주는'
+    게 아니라 '통째로 버리고' 500("no user query found in messages")을 낸다 (q2 에서 실증).
+    """
+    text = json.dumps(compact_evidence({
         "deviations": tools.evidence.get("deviations"),   # ← 정상 대비 편차(코드가 랭크). 여기부터 본다.
         "meta": tools.get_meta(),
         "hosts": tools.get_hosts_info(),
@@ -50,11 +61,23 @@ def _tier1(tools):
         "anomalies": tools.get_anomalies(),
         "signals": tools.get_signals(),
     }), ensure_ascii=False, default=str)
+    est = int(len(text) / CHARS_PER_TOKEN)
+    flag = "  ‼ NUM_CTX 초과 추정 — .env NUM_CTX 를 올리거나 evidence 를 줄여야 함" if est > NUM_CTX * 0.9 else ""
+    print(f"[tier1] {len(text):,} chars ≈ {est:,} tokens (NUM_CTX={NUM_CTX:,}){flag}")
+    return text
+
+
+def _chat(**kw):
+    """ollama chat 래퍼 — 서버 에러를 LLMError 로 바꿔 main 이 보고서에 기록하게 한다."""
+    from ollama import chat
+    try:
+        return chat(**kw)
+    except Exception as ex:                           # ResponseError(500 등)·연결 실패 모두
+        raise LLMError(f"{type(ex).__name__}: {ex}") from ex
 
 
 def triage(tools):
-    from ollama import chat
-    res = chat(model=MODEL, format=VERDICT_SCHEMA,   # ← format 이 강제 선택
+    res = _chat(model=MODEL, format=VERDICT_SCHEMA,   # ← format 이 강제 선택
                think=THINK,                            # .env THINK — qwen3.8 은 추론이 본체(끄면 판단력 급감)
                messages=[{"role": "system", "content": SYSTEM_PROMPT_TRIAGE},
                          {"role": "user", "content": "Triage this capture.\n\n# Tier-1 Evidence\n" + _tier1(tools)}],
@@ -78,7 +101,6 @@ def triage(tools):
 
 
 def forensic(tools):
-    from ollama import chat
     # deviations 를 먼저 읽으라고 프레이밍 — 코드가 정상(baseline) 대비 튀는 것만 랭크해 둠.
     #   baseline 강등된 것(MS텔레메트리·광고·정상 AD RPC)은 정상이니 IOC/공격으로 올리지 말 것.
     #   host_deviations = '공격 후 안 하던 짓 시작' = 침해/성공 판단의 1차 근거.
@@ -90,7 +112,7 @@ def forensic(tools):
              "- alerts 의 threat_class: `threat`/`rat` 만 위협이다. `benign`(INFO/CHAT/"
              "FILE_SHARING) 은 severity 1 이어도 위협이 아니다 — 그 IP/도메인을 iocs 에 넣지 마라.\n"
              "- 그 다음 alerts/external/http 등 raw 로 세부를 확인하라.\n\n")
-    res = chat(model=MODEL, format=REPORT_SCHEMA, think=THINK,
+    res = _chat(model=MODEL, format=REPORT_SCHEMA, think=THINK,
                messages=[{"role": "system", "content": SYSTEM_PROMPT_FORENSIC},
                          {"role": "user",
                           "content": "Analyze this incident and return the structured JSON.\n\n"
@@ -498,7 +520,25 @@ def main():
     tools = Tools(filename)
 
     # 3. triage → (에스컬레이션 시) forensic. 모든 결과를 하나의 JSON 으로.
-    res = triage(tools)
+    ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    outdir = os.path.join(ROOT, "reports")
+    os.makedirs(outdir, exist_ok=True)
+    path = os.path.join(outdir, f"{filename}.json")
+
+    def fail(stage, err):
+        # LLM 호출 실패 = 판정 없음. 지어내지 않고 실패를 보고서로 남긴다 (verdict=null).
+        #   노트북/make_policy/render 는 pipeline_status 를 보고 건너뛴다.
+        out = {"verdict": None, "grounds": [f"{stage} LLM 호출 실패: {err}"],
+               "pipeline_status": f"llm_error:{stage}"}
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(out, f, ensure_ascii=False, indent=2)
+        print(f"[main] {stage} 실패 — {err}\n[report] 실패 기록 → {path}")
+        sys.exit(1)
+
+    try:
+        res = triage(tools)
+    except LLMError as ex:
+        fail("triage", ex)
     out = {"verdict": res["verdict"], "grounds": res.get("grounds", []),
            "pipeline_status": "ok"}          # 부분 산출물(파싱 실패)과 완전 산출물을 구분
 
@@ -509,7 +549,10 @@ def main():
             print(f"  - {g}")
         print("잔여 리스크: 본 판정은 시그니처+행동 휴리스틱 커버리지 내에서만 유효함.")
     else:
-        analysis = forensic(tools)
+        try:
+            analysis = forensic(tools)
+        except LLMError as ex:
+            fail("forensic", ex)
         if analysis:
             apply_guards(analysis, tools)
             out["analysis"] = analysis
@@ -519,10 +562,6 @@ def main():
             print("[main] 분석 JSON 생성 실패 — verdict 만 저장 (pipeline_status=forensic_parse_failed)")
 
     # 4. JSON 저장 (채점/렌더링 공통 입력)
-    ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    outdir = os.path.join(ROOT, "reports")
-    os.makedirs(outdir, exist_ok=True)
-    path = os.path.join(outdir, f"{filename}.json")
     with open(path, "w", encoding="utf-8") as f:
         json.dump(out, f, ensure_ascii=False, indent=2)
     print(f"[report] 저장됨 → {path}")
