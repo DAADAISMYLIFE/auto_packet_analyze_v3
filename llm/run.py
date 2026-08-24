@@ -1,6 +1,6 @@
 import sys, json, re, os
 
-from tools import Tools, compact_evidence
+from tools import Tools, compact_evidence, is_threat_alert
 from config import (MODEL, OPTS, THINK, NUM_CTX, VERDICT_SCHEMA, REPORT_SCHEMA,
                     SYSTEM_PROMPT_TRIAGE, SYSTEM_PROMPT_FORENSIC)
 # ollama 는 LLM 호출 함수 안에서 지연 import — 가드(코드 소유 후처리)는 ollama 없이도
@@ -19,51 +19,58 @@ PUBLIC_SUFFIX_FLOOR = {"co.kr", "or.kr", "go.kr", "ne.kr", "pe.kr",
 # (.ru/.com 등 정상 트래픽 많은 TLD 는 제외 — 오탐 위험. detection 용, 차단은 make_policy 소유.)
 SUSP_TLD = re.compile(r"\.(su|cc|cyou|xyz|top|tk|gq|ml|cf|ga)$")
 
-# 레거시 폴백 전용 — 위협 분류의 단일 소스는 scripts/baseline.threat_class 이고, build_evidence 가
-# alert 마다 threat_class 필드로 스탬프한다. 이 정규식은 그 필드가 없는 '구 evidence.json' 에서만
-# 쓰인다. (숫자 severity 는 못 믿는다 — ET CHAT Skype / FILE_SHARING Dropbox 가 sev1.)
-_THREAT_SIG = re.compile(
-    r"\b(MALWARE|TROJAN|CNC|COINMINER|EXPLOIT|ATTACK_RESPONSE|WEB_SERVER|"
-    r"WEB_SPECIFIC_APPS|CURRENT_EVENTS|SCAN|PHISHING|WORM|ROOTKIT|DOS|"
-    r"SHELLCODE|MOBILE_MALWARE|REMOTE_ACCESS)\b", re.I)
+# 위협 alert 판정은 tools.is_threat_alert 가 단일 구현 (evidence.threat_class 우선, 구 evidence 정규식 폴백).
+_is_threat_alert = is_threat_alert
 
 
-def _is_threat_alert(a):
-    """위협 alert 판정 — evidence 의 threat_class(단일 소스) 우선, 없으면 정규식 폴백."""
-    tc = a.get("threat_class")
-    if tc is not None:
-        return tc in ("threat", "rat")
-    return bool(_THREAT_SIG.search(a.get("signature") or ""))
-
-
-CHARS_PER_TOKEN = 3.3   # JSON/영문 기준 보수적 추정 (한글 섞이면 더 적음)
+# 컨텍스트 예산 — NUM_CTX 의 일부만 입력에 쓴다(사고 토큰 + 출력 여유). triage 는 3지선다라 더 짧게.
+#   예산 안에 들어가면 뷰 level 0 (= 오늘과 동일). 넘칠 때만 '신호 없는 행'부터 단계적으로 줄인다.
+BUDGET_FRACTION = {"forensic": 0.6, "triage": 0.25}
 
 
 class LLMError(RuntimeError):
     """ollama 호출 자체가 실패 (컨텍스트 초과·서버 다운 등). 파싱 실패와 구분."""
 
 
-def _tier1(tools):
-    """LLM 에 주입하는 tier1 근거 번들 (triage/forensic 공통). compact_evidence = 무손실 표 압축.
+def estimate_tokens(text):
+    """qwen/llama 계열 토크나이저 근사: 숫자는 자릿수마다 1토큰, 구두점 1토큰, 나머지 ≈3.5자/토큰.
+    (3.3자/토큰 단순 추정은 IP·epoch·해시 덩어리인 evidence 에서 40% 과소 — q2 실증.)"""
+    d = sum(c.isdigit() for c in text)
+    p = sum(c in '.,:"[]{}/-_=?&%' for c in text)
+    return int(d + p + (len(text) - d - p) / 3.5)
 
-    크기를 NUM_CTX 와 대조해 찍는다 — ollama 는 컨텍스트에 안 들어가는 user 메시지를 '잘라주는'
-    게 아니라 '통째로 버리고' 500("no user query found in messages")을 낸다 (q2 에서 실증).
-    """
-    text = json.dumps(compact_evidence({
+
+def _bundle(tools, http):
+    return json.dumps(compact_evidence({
         "deviations": tools.evidence.get("deviations"),   # ← 정상 대비 편차(코드가 랭크). 여기부터 본다.
         "meta": tools.get_meta(),
         "hosts": tools.get_hosts_info(),
         "alerts": tools.get_alerts(),                       # threat_class 포함 — 코드가 아는 위협/정황 구분
         "external": tools.get_external(),
-        "http": tools.get_http(),
+        "http": http,                                       # 단계적 뷰 (tools.http_view)
         "files": tools.get_files(),
         "lateral_movement": tools.get_lateral_movement(),
         "anomalies": tools.get_anomalies(),
         "signals": tools.get_signals(),
     }), ensure_ascii=False, default=str)
-    est = int(len(text) / CHARS_PER_TOKEN)
-    flag = "  ‼ NUM_CTX 초과 추정 — .env NUM_CTX 를 올리거나 evidence 를 줄여야 함" if est > NUM_CTX * 0.9 else ""
-    print(f"[tier1] {len(text):,} chars ≈ {est:,} tokens (NUM_CTX={NUM_CTX:,}){flag}")
+
+
+def _tier1(tools, mode="forensic"):
+    """LLM 에 주입하는 tier1 근거 번들. 예산에 맞을 때까지 http 뷰를 강등하고, 그래도 넘치면
+    호출 '전'에 실패한다 — ollama 는 안 들어가는 user 메시지를 잘라주지 않고 통째로 버린 뒤
+    500 을 내며, 그 전에 12분을 태운다(q2 실증)."""
+    budget = int(NUM_CTX * BUDGET_FRACTION.get(mode, 0.6))
+    text = est = level = None
+    for level in range(Tools.HTTP_VIEW_LEVELS):
+        text = _bundle(tools, tools.http_view(level))
+        est = estimate_tokens(text)
+        if est <= budget:
+            break
+    print(f"[tier1:{mode}] http-view level={level}  {len(text):,} chars ≈ {est:,} tokens  "
+          f"(budget {budget:,} / NUM_CTX {NUM_CTX:,})")
+    if est > budget:
+        raise LLMError(f"tier1 ≈{est:,} tokens > budget {budget:,} (최대 강등 후에도) — 호출 안 함. "
+                       f"NUM_CTX 상향 또는 evidence 캡 축소 필요")
     return text
 
 
@@ -80,7 +87,7 @@ def triage(tools):
     res = _chat(model=MODEL, format=VERDICT_SCHEMA,   # ← format 이 강제 선택
                think=THINK,                            # .env THINK — qwen3.8 은 추론이 본체(끄면 판단력 급감)
                messages=[{"role": "system", "content": SYSTEM_PROMPT_TRIAGE},
-                         {"role": "user", "content": "Triage this capture.\n\n# Tier-1 Evidence\n" + _tier1(tools)}],
+                         {"role": "user", "content": "Triage this capture.\n\n# Tier-1 Evidence\n" + _tier1(tools, "triage")}],
                options=OPTS)
 
     content = res.message.content
@@ -116,7 +123,7 @@ def forensic(tools):
                messages=[{"role": "system", "content": SYSTEM_PROMPT_FORENSIC},
                          {"role": "user",
                           "content": "Analyze this incident and return the structured JSON.\n\n"
-                                     + guide + "# Tier-1 Evidence\n" + _tier1(tools)}],
+                                     + guide + "# Tier-1 Evidence\n" + _tier1(tools, "forensic")}],
                options=OPTS)
     try:
         return json.loads(res.message.content)

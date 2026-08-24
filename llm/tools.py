@@ -2,7 +2,7 @@
 Defines the tools the local LLM (sLLM) can call.
 """
 
-import ipaddress, os, json
+import ipaddress, os, json, re
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -12,7 +12,34 @@ Facts that MUST be extractable from the evidence file.
 ========================================================================== 
 """
 
+# ── 위협 alert 판정: 단일 소스는 evidence 의 threat_class(build_evidence 가 baseline.threat_class 로 스탬프).
+#    필드가 없는 '구 evidence.json' 에서만 정규식 폴백. (숫자 severity 는 못 믿는다 — ET CHAT Skype 가 sev1.)
+_THREAT_SIG = re.compile(
+    r"\b(MALWARE|TROJAN|CNC|COINMINER|EXPLOIT|ATTACK_RESPONSE|WEB_SERVER|"
+    r"WEB_SPECIFIC_APPS|CURRENT_EVENTS|SCAN|PHISHING|WORM|ROOTKIT|DOS|"
+    r"SHELLCODE|MOBILE_MALWARE|REMOTE_ACCESS)\b", re.I)
+
+
+def is_threat_alert(a):
+    tc = a.get("threat_class")
+    if tc is not None:
+        return tc in ("threat", "rat")
+    return bool(_THREAT_SIG.search(a.get("signature") or ""))
+
+
 class Tools:
+    # ── LLM 뷰 강등 단계 (http). evidence.json 은 무손실 — 줄이는 건 '보여주는 것'뿐 ──
+    #   0 전량(= get_http, 예산 안이면 오늘과 동일)  1 신호없는 행 응답/헤더 지문
+    #   2 신호없는 행 접기(템플릿 그룹+건수)          3 신호없는 행 목적지별 건수
+    #   4 신호 행도 접기(페이로드 표본 유지) — triage 급
+    #   '신호 행'(인바운드·위협alert·편차·이상행동·의심TLD·웹공격패턴)은 0~3 에서 항상 전량.
+    HTTP_VIEW_LEVELS = 5
+    SUSP_TLD = re.compile(r"\.(?:su|cc|cyou|xyz|top|tk|gq|ml|cf|ga)$", re.I)
+    # 일반 웹공격 패턴 — 보조 신호일 뿐. 목록 밖의 '처음 보는' 공격은 인바운드 규칙이 받친다.
+    WEB_ATTACK_PAT = re.compile(
+        r"(?:\.\./|%2e%2e|union(?:%20|\+|\s)+select|\(\)\s*\{\s*:\s*;|[?&](?:cmd|exec)=|"
+        r"filename=[^\r\n]{0,80}\.(?:php|jsp|aspx)|/etc/passwd|%00)", re.I)
+
     def __init__(self, filename):
         # evidence 파일 로드
         self.base = os.path.join(ROOT, "output", filename)
@@ -344,6 +371,164 @@ class Tools:
                 if f.get(k):
                     hashes.add(str(f[k]).lower())
         return {"ips": ips, "domains": doms, "hashes": hashes}
+
+    # ===================== LLM 뷰: http 단계적 강등 (코드 전용, 결정론) =====================
+    def _http_signal_sets(self):
+        """행이 '신호 행'인지 판정할 집합들 — 전부 evidence 의 코드 산출물에서 나온다."""
+        e = self.evidence
+        internal = {str(h.get("ip")) for h in e.get("hosts", []) if h.get("ip")}
+        threat_ips = {str(ip) for a in e.get("alerts", []) if is_threat_alert(a)
+                      for ip in (a.get("src_ips") or []) + (a.get("dst_ips") or [])}
+        dev = e.get("deviations") or {}
+        dev_ips = {str(d.get("dest")).lower() for d in (dev.get("top") or []) if d.get("kind") == "ip"}
+        dev_doms = {str(d.get("dest")).lower() for d in (dev.get("top") or []) if d.get("kind") == "domain"}
+        an = e.get("anomalies") or {}
+        anomaly_dsts = {str(x.get("dst")) for k in ("beacons", "exfil_candidates", "no_dns_direct", "odd_ports")
+                        for x in (an.get(k) or []) if x.get("dst")}
+        return internal, threat_ips, dev_ips, dev_doms, anomaly_dsts
+
+    def _is_signal_http(self, h, S):
+        internal, threat_ips, dev_ips, dev_doms, anomaly_dsts = S
+        dst = str(h.get("dst_ip") or "")
+        host = str(h.get("url") or "").split("/", 1)[0].lower()
+        if dst in internal:                                   # 인바운드 = 공격면 (패턴 무관)
+            return True
+        if dst in threat_ips or dst in anomaly_dsts or dst in dev_ips:
+            return True
+        if any(host == d or host.endswith("." + d) for d in dev_doms):
+            return True
+        if self.SUSP_TLD.search(host):
+            return True
+        blob = " ".join(str(h.get(k) or "") for k in ("url", "req_body", "req_headers"))
+        return bool(self.WEB_ATTACK_PAT.search(blob))
+
+    @staticmethod
+    def _url_template(url):
+        """랜덤 경로/ID 를 접기 위한 템플릿: 숫자열→N, 8자+ 영숫자 토큰→*  (클릭사기·CDN 해시 경로 그룹화)."""
+        u = str(url or "")
+        u = re.sub(r"[A-Za-z0-9+_-]{8,}", "*", u)
+        return re.sub(r"\d+", "N", u)
+
+    @staticmethod
+    def _fp(v, n):
+        if v is None or v == "None" or v == "":
+            return None
+        v = str(v)
+        return v if len(v) <= n else v[:n] + "…"
+
+    def _fold(self, rows, fp_len):
+        """같은 (src, dst, method, status, url템플릿) 행을 그룹 하나로. 건수 보존 + 표본 1개."""
+        groups = {}
+        for h in rows:
+            key = (tuple(h.get("src_ips") or []), h.get("dst_ip"), h.get("method"),
+                   str(h.get("status")), self._url_template(h.get("url")))
+            g = groups.get(key)
+            if g is None:
+                g = groups[key] = {
+                    "url_template": key[4], "sample_url": h.get("url"), "method": h.get("method"),
+                    "dst_ip": h.get("dst_ip"), "src_ips": h.get("src_ips"), "status": h.get("status"),
+                    "user_agent": self._fp(h.get("user_agent"), 60),
+                    "requests": 0, "rows_folded": 0, "first_ts": h.get("first_ts"),
+                    "req_body": self._fp(h.get("req_body"), fp_len),
+                    "req_headers": self._fp(h.get("req_headers"), fp_len),
+                    "resp_body": self._fp(h.get("resp_body"), fp_len // 2 or 1),
+                }
+            g["requests"] += int(h.get("count") or 1)
+            g["rows_folded"] += 1
+            ts = h.get("first_ts")
+            if ts is not None and (g["first_ts"] is None or ts < g["first_ts"]):
+                g["first_ts"] = ts
+            for k in ("req_body", "req_headers", "resp_body"):     # 표본은 '내용 있는 것' 우선
+                if not g[k] and h.get(k) not in (None, "None", ""):
+                    g[k] = self._fp(h[k], fp_len if k != "resp_body" else fp_len // 2 or 1)
+        return sorted(groups.values(), key=lambda g: (g["first_ts"] is None, g["first_ts"]))
+
+    def _fold_by_payload(self, rows, fp_len):
+        """신호 행 접기 — '무엇을 보냈나'(헤더/바디 템플릿) 기준. 스캐너/익스플로잇 스프레이는 같은
+        페이로드로 수백 경로를 두드리므로 경로별로 접으면 그룹이 폭증한다. 경로는 표본 3개 + 개수."""
+        groups = {}
+        for h in rows:
+            key = (tuple(h.get("src_ips") or []), h.get("dst_ip"), h.get("method"),
+                   self._url_template(self._fp(h.get("req_headers"), fp_len)),
+                   self._url_template(self._fp(h.get("req_body"), fp_len)))
+            g = groups.get(key)
+            if g is None:
+                g = groups[key] = {
+                    "method": h.get("method"), "dst_ip": h.get("dst_ip"), "src_ips": h.get("src_ips"),
+                    "sample_urls": [], "distinct_urls": 0, "statuses": set(),
+                    "user_agent": self._fp(h.get("user_agent"), 60),
+                    "requests": 0, "rows_folded": 0, "first_ts": h.get("first_ts"),
+                    "req_headers": self._fp(h.get("req_headers"), fp_len),
+                    "req_body": self._fp(h.get("req_body"), fp_len),
+                    "resp_body": self._fp(h.get("resp_body"), fp_len // 2 or 1),
+                }
+            g["requests"] += int(h.get("count") or 1)
+            g["rows_folded"] += 1
+            g["distinct_urls"] += 1
+            if len(g["sample_urls"]) < 3:
+                g["sample_urls"].append(h.get("url"))
+            g["statuses"].add(str(h.get("status")))
+            ts = h.get("first_ts")
+            if ts is not None and (g["first_ts"] is None or ts < g["first_ts"]):
+                g["first_ts"] = ts
+            if not g["resp_body"] and h.get("resp_body") not in (None, "None", ""):
+                g["resp_body"] = self._fp(h["resp_body"], fp_len // 2 or 1)
+        out = []
+        for g in groups.values():
+            g["statuses"] = sorted(g["statuses"]); out.append(g)
+        return sorted(out, key=lambda g: (g["first_ts"] is None, g["first_ts"]))
+
+    @staticmethod
+    def _summarize_by_dst(rows):
+        by = {}
+        for h in rows:
+            d = by.setdefault(str(h.get("dst_ip")), {"dst_ip": h.get("dst_ip"), "rows": 0, "requests": 0,
+                                                    "methods": set(), "statuses": set(), "first_ts": None})
+            d["rows"] += 1; d["requests"] += int(h.get("count") or 1)
+            d["methods"].add(str(h.get("method"))); d["statuses"].add(str(h.get("status")))
+            ts = h.get("first_ts")
+            if ts is not None and (d["first_ts"] is None or ts < d["first_ts"]):
+                d["first_ts"] = ts
+        out = []
+        for d in by.values():
+            d["methods"] = sorted(d["methods"]); d["statuses"] = sorted(d["statuses"])
+            out.append(d)
+        return sorted(out, key=lambda d: -d["requests"])
+
+    def http_view(self, level):
+        """level 0 = get_http() 그대로(리스트). 1+ = {_view, signal_rows, other_*} — 접은 건 반드시 알린다."""
+        rows = self.get_http()
+        if level <= 0:
+            return rows
+        S = self._http_signal_sets()
+        sig = [h for h in rows if self._is_signal_http(h, S)]
+        other = [h for h in rows if not self._is_signal_http(h, S)]
+        view = {"level": level, "total_rows": len(rows), "signal_rows": len(sig), "other_rows": len(other),
+                "signal_rule": "inbound-to-internal | threat-alert dst | deviation dest | anomaly dst | susp-TLD | web-attack pattern"}
+        out = {"_view": view}
+        if level == 1:
+            view["other_shown_as"] = "fingerprint(resp_body/req_headers 80자)"
+            out["signal_rows"] = sig
+            out["other_rows"] = [dict(h, resp_body=self._fp(h.get("resp_body"), 80),
+                                      req_headers=self._fp(h.get("req_headers"), 80)) for h in other]
+        elif level == 2:
+            folded = self._fold(other, 80)
+            view["other_shown_as"] = f"folded into {len(folded)} groups (url template + count)"
+            out["signal_rows"] = sig
+            out["other_groups"] = folded
+        elif level == 3:
+            summ = self._summarize_by_dst(other)
+            view["other_shown_as"] = f"per-destination counts ({len(summ)} dsts)"
+            out["signal_rows"] = sig
+            out["other_summary"] = summ
+        else:
+            folded = self._fold_by_payload(sig, 160)
+            summ = self._summarize_by_dst(other)
+            view["signal_shown_as"] = f"folded by payload into {len(folded)} groups (sample_urls 3 + distinct_urls), payload 160자"
+            view["other_shown_as"] = f"per-destination counts ({len(summ)} dsts)"
+            out["signal_groups"] = folded
+            out["other_summary"] = summ
+        return out
 
 
 # ====================== LLM 전송용 무손실 구조 압축 ======================

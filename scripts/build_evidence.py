@@ -25,6 +25,7 @@ import glob
 import json
 import math
 import os
+import re
 import statistics
 import sys
 from collections import Counter, defaultdict
@@ -857,20 +858,109 @@ def build_evidence(name, root="/home/qkekdhd/auto_packet_analyze_v3"):
         if ts and (e["first_ts"] is None or ts < e["first_ts"]):
             e["first_ts"] = ts
 
-    # 시간순 정렬 + 캡 (초과분은 _truncation)
-    def capped(d, cap, label):
-        items = sorted(d.values(), key=lambda x: (x["first_ts"] is None, x["first_ts"]))
-        if len(items) > cap:
-            trunc[label] = len(items) - cap
-            items = items[:cap]
-        return items
+    # ── anomalies 는 캡 '전'에 계산 — 비콘/유출/odd-port 목적지가 캡 우선순위의 재료 ──
+    #   (무시그니처 행동 측정치. brute_force 를 같은 채널에 합류 → get_anomalies 로 자동 노출)
+    anomalies = build_anomalies(conn, hosts, dns_recs)
+    anomalies["brute_force"] = build_bruteforce(conn, Z, hosts, read_ndjson)
 
+    # ── 캡 우선순위 재료 (전부 결정론, 케이스 무관) ──
+    #   시간순 캡은 24h 캡처에서 '첫 75분'만 싣고 후반 공격을 통째로 버린다(q2 실측: 인바운드
+    #   Shellshock 865건이 캡 밖). 그래서 '무엇을 실을지'는 시간이 아니라 코드 신호로 정한다:
+    #     인바운드(내부 호스트로 온 요청 = 공격면) > 위협-카테고리 alert 연결 > 이상행동 목적지
+    #     > 의심 TLD > (http) 일반 웹공격 패턴 > 나머지 시간순.
+    #   인바운드 규칙은 패턴 목록과 무관하게 '처음 보는' 공격도 살린다(패턴은 보조 신호일 뿐).
+    internal_ips = set(hosts)
+    threat_alert_ips = {ip for (sig, _c, _s), st in sig_stat.items()
+                        if threat_class(sig) in ("threat", "rat")
+                        for ip in (st["src"] | st["dst"])}
+    anomaly_dsts = {str(x.get("dst")) for key in ("beacons", "exfil_candidates", "no_dns_direct", "odd_ports")
+                    for x in (anomalies.get(key) or []) if x.get("dst")}
+    entropy_qs = {str(q.get("query")) for q in ((anomalies.get("dns") or {}).get("high_entropy") or [])
+                  if isinstance(q, dict) and q.get("query")}
+    _susp_tld = re.compile(r"\.(?:su|cc|cyou|xyz|top|tk|gq|ml|cf|ga)$", re.I)
+    _web_pat = re.compile(r"(?:\.\./|%2e%2e|union(?:%20|\+|\s)+select|\(\)\s*\{\s*:\s*;|[?&](?:cmd|exec)=|"
+                          r"filename=[^\r\n]{0,80}\.(?:php|jsp|aspx)|/etc/passwd|%00)", re.I)
+
+    def host_of_url(u):
+        return str(u or "").split("/", 1)[0].lower()
+
+    def pri_http(x):
+        if x.get("dst_ip") in internal_ips:
+            return 100                                   # 인바운드 = 공격면, 무조건 보존
+        if x.get("dst_ip") in threat_alert_ips:
+            return 80
+        if x.get("dst_ip") in anomaly_dsts:
+            return 60
+        if _susp_tld.search(host_of_url(x.get("url"))):
+            return 50
+        blob = " ".join(str(x.get(k) or "") for k in ("url", "req_body", "req_headers"))
+        if _web_pat.search(blob):
+            return 40                                    # 보조 신호 (목록 밖 공격은 인바운드 규칙이 받침)
+        return 20 if x.get("req_body") else 0
+
+    def pri_ip(x):
+        ip = x.get("ip")
+        return 80 if ip in threat_alert_ips else (60 if ip in anomaly_dsts else 0)
+
+    def pri_dom(x):
+        ans = set(str(a) for a in (x.get("answers") or []))
+        q = str(x.get("query") or "")
+        if ans & threat_alert_ips:
+            return 80
+        if _susp_tld.search(q):
+            return 60
+        if q in entropy_qs or ans & anomaly_dsts:
+            return 50
+        return 0
+
+    def pri_sni(x):
+        return 60 if _susp_tld.search(str(x.get("sni") or "")) else 0
+
+    def by_time(items):
+        return sorted(items, key=lambda x: (x["first_ts"] is None, x["first_ts"]))
+
+    PRI_NAME = {100: "inbound", 80: "threat-alert", 60: "anomaly-dst", 50: "susp-tld",
+                40: "web-pattern", 20: "has-body", 0: "rest"}
+
+    def capped(d, cap, label, priority):
+        """신호 우선 cap — 단, tier 별 '최소 할당'을 먼저 보장한다.
+        순수 우선순위 정렬은 스캔 폭풍(인바운드 1,000건)이 cap 을 독식해 아웃바운드 C2 행이
+        통째로 밀려나는 반대 손실을 만든다(q2 실측). 그래서 (1) 비어있지 않은 tier 마다
+        cap//tier수 를 시간순으로 먼저 채우고, (2) 남은 슬롯을 우선순위 순으로 준다.
+        tier 별 탈락 건수를 _truncation 에 남겨 '뭘 못 봤는지'를 알린다."""
+        items = list(d.values())
+        if len(items) <= cap:
+            return by_time(items)
+        tiers = {}
+        for x in items:
+            tiers.setdefault(priority(x), []).append(x)
+        for t in tiers.values():
+            t.sort(key=lambda x: (x["first_ts"] is None, x["first_ts"]))
+        order = sorted(tiers, reverse=True)
+        floor = cap // len(order)
+        chosen, remaining = [], cap
+        for p in order:                                  # (1) tier 별 최소 할당
+            take = tiers[p][:floor]
+            chosen += take; tiers[p] = tiers[p][floor:]; remaining -= len(take)
+        for p in order:                                  # (2) 남은 슬롯은 우선순위 순
+            if remaining <= 0:
+                break
+            take = tiers[p][:remaining]
+            chosen += take; tiers[p] = tiers[p][remaining:]; remaining -= len(take)
+        trunc[label] = len(items) - len(chosen)
+        trunc[label + "_by_tier"] = {PRI_NAME.get(p, str(p)): len(v) for p, v in tiers.items() if v}
+        return by_time(chosen)
+
+    full_external = {"ips": by_time(ext_ip.values()), "domains": by_time(ext_dom.values()),
+                     "sni": by_time(ext_sni.values()), "http": by_time(ext_http.values())}
     external = {
-        "ips": capped(ext_ip, CAP_EXTERNAL_IPS, "external_ips_dropped"),
-        "domains": capped(ext_dom, CAP_EXTERNAL_DOMAINS, "external_domains_dropped"),
-        "sni": capped(ext_sni, CAP_EXTERNAL_SNI, "external_sni_dropped"),
-        "http": capped(ext_http, CAP_EXTERNAL_HTTP, "external_http_dropped"),
+        "ips": capped(ext_ip, CAP_EXTERNAL_IPS, "external_ips_dropped", pri_ip),
+        "domains": capped(ext_dom, CAP_EXTERNAL_DOMAINS, "external_domains_dropped", pri_dom),
+        "sni": capped(ext_sni, CAP_EXTERNAL_SNI, "external_sni_dropped", pri_sni),
+        "http": capped(ext_http, CAP_EXTERNAL_HTTP, "external_http_dropped", pri_http),
     }
+    if trunc:
+        trunc["_policy"] = "signal-priority cap: inbound > threat-alert > anomaly-dst > susp-tld > web-pattern > time"
 
     # ── alerts: severity 우선(1 먼저), 동률이면 count 많은 순 ──
     def sev_key(item):
@@ -893,11 +983,6 @@ def build_evidence(name, root="/home/qkekdhd/auto_packet_analyze_v3"):
     cap_start = min(conn_ts) if conn_ts else None
     cap_end = max(conn_ts) if conn_ts else None
 
-    # anomalies = 무시그니처 행동 측정. brute_force(반복/속도/인증실패)를 같은 채널에 합류
-    #   → get_anomalies 로 자동 노출되어 LLM 이 시그니처 0건이어도 '양'으로 판단 가능.
-    anomalies = build_anomalies(conn, hosts, dns_recs)
-    anomalies["brute_force"] = build_bruteforce(conn, Z, hosts, read_ndjson)
-
     evidence = {
         "meta": {
             "pcap": name,
@@ -919,7 +1004,8 @@ def build_evidence(name, root="/home/qkekdhd/auto_packet_analyze_v3"):
     }
     # 결정론 편차 프로파일 — 정상(baseline) 대비 튀는 것만 랭크. LLM 이 raw 덤프 대신
     #   여기부터 보게 해서 잘림 방어 + 오탐(MS텔레메트리·광고·AD RPC)을 뿌리에서 강등.
-    evidence["deviations"] = profile_deviations(evidence)
+    #   캡 '전' 전량(full_external)으로 계산 — 랭킹이 캡에 좌우되면 안 된다.
+    evidence["deviations"] = profile_deviations({**evidence, "external": full_external})
     return evidence
 
 

@@ -168,7 +168,7 @@ zeek는 네이티브가 없으면 **docker `zeek/zeek:latest`** 로 폴백. 출�
 | `get_hosts_info()` | 전 호스트 ip/mac/hostname/username/role/ad_domain + 활동창 |
 | `get_alerts()` | Suricata 알럿 전량(시그니처/severity/**threat_class**/count/src/dst) — 모델은 severity 가 아니라 threat_class 로 위협을 가른다 |
 | `get_external()` | **알럿에 엮인** 외부 ip/도메인 + sni (배경 CDN/텔레메트리 노이즈 제거) |
-| `get_http()` | 웹 요청 전량(method/url/uri/status/UA) — **무필터**(웹공격은 alert 없어도 URI에 있음) |
+| `get_http()` / `http_view(level)` | 웹 요청 전량(method/url/status/UA/body/헤더). `http_view` 는 예산 초과 시에만 쓰는 단계적 강등 뷰(신호 행 보존, 접은 건 `_view` 로 명시) — `_tier1` 이 예산에 맞는 최저 level 을 고른다 |
 | `get_files()` | 멀웨어 후보 파일(실행/압축/스크립트)은 전문, 나머지는 mime별 요약 |
 | `get_lateral_movement()` | 내부↔내부: dst 역할별 dcerpc_ops/smb_shares/smb_writes (정찰 vs 실행 구분 재료) |
 | `get_anomalies()` | 무시그니처 행동 측정치(비콘/업로드비율/no-dns/odd-port/역할이탈/DNS엔트로피) |
@@ -258,7 +258,10 @@ llama.cpp 그래머라 대부분 모델 가능.
    (LLM 쪽은 남음) 모델이 직접 iocs 에 넣은 **관측된** 광고 도메인·구글/페북 exfil 은 `ground_iocs` 가 '존재'만 대조하므로 통과한다
    (q2: 도메인 28개 중 25개가 광고, exfil 3개가 페북/구글). 프롬프트에 threat_class/baseline 지시를 넣었고, 남은 건
    **score.py 에 precision(iocP/domP) 추가** — 지금 채점표는 recall 뿐이라 과차단이 어느 숫자에도 안 잡힌다.
-3. **tier1 컨텍스트 초과** — http body로 tier1 비대(q2 ≈ 65k 토큰, NUM_CTX 한계). body 바이트의 99%가 응답 body이고 300행이 방향 무관하게 다 싣는 것이 원인. → 방향 기반 body 예산(내부 서버로 온 요청은 body/헤더 전량, 외부에서 받은 응답은 지문만). 인코딩은 코드가 먼저 디코드(base64/url/gzip) 후 판단.
+3. **tier1 컨텍스트 초과** — (해결) q2 tier1 은 qwen 토크나이저(숫자 1자=1토큰) 기준 **136k 토큰**이었고, ollama 는 안 들어가는 user 메시지를 잘라주지 않고 통째로 버린다("no user query found", 12분 태운 뒤). 두 층에서 고쳤다:
+   - **evidence 캡을 시간순 → 신호 우선 + tier 별 최소 할당**(build_evidence `capped`): 인바운드(공격면) > 위협 alert 연결 > 이상행동 목적지 > 의심 TLD > 웹공격 패턴 > 시간순. 시간순 캡은 24h 캡처의 첫 75분만 싣고 Shellshock 865건을 버렸었다. tier 별 탈락 건수가 `_truncation.*_by_tier` 에 남는다. 편차 랭킹은 캡 전 전량으로 계산.
+   - **LLM 뷰 단계적 강등**(tools `http_view`, run `_tier1`): 예산(NUM_CTX×0.6 forensic / ×0.25 triage) 안이면 **level 0 = 전량(오늘과 동일 — 소형 5케이스 실측 동일)**. 넘칠 때만 '신호 없는 행'부터 지문→접기→건수로 줄이고, 신호 행(인바운드·위협alert·편차·이상행동·의심TLD·웹패턴)은 level 3 까지 전량, level 4 에서 페이로드 기준 접기(스프레이 = 같은 페이로드 × 여러 경로 → 표본 3 + 개수). 접은 건 `_view` 로 모델에 알린다. 최대 강등 후에도 넘치면 **호출 전** 실패. q2: 136k → 25k, Shellshock/터널/C2 전부 생존. 계약은 `test_views.py` 가 잠근다(처음 보는 인바운드 페이로드가 모든 단계에서 생존).
+   - 남은 것: 인코딩(base64/url/gzip)은 여전히 코드가 안 풀어준다.
 4. **근거(grounds) 영어** — `forensic.md` 가 한글을 강제하는 필드가 `timeline.event`/`assessment` 둘뿐 → `grounds` 는 영어 evidence를 미러링. → 한글 강제 목록에 `grounds` 추가.
 
 **기존 한계:**
