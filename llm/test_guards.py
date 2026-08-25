@@ -304,6 +304,32 @@ def test_upgrade_verdict_deterministic():
     assert out2["verdict"] == "suspicious"          # 침해 확정 호스트 없으면 승급 안 함
 
 
+# ─────────────── forensic 캐시/replay (개발 루프 가속기) ───────────────
+def test_forensic_cache_roundtrip(tmpbase="/tmp/claude-1000/-home-qkekdhd-slm-auto-packet-analyze-v3/f6467c84-eeb5-4912-9291-e32ee6c1bdd7/scratchpad/fc_case"):
+    import os, json as _j
+    os.makedirs(tmpbase, exist_ok=True)
+    if os.path.exists(os.path.join(tmpbase, "forensic_raw.json")):
+        os.remove(os.path.join(tmpbase, "forensic_raw.json"))   # 이전 실행 잔재 제거(격리)
+    e = ev(hosts=[WS], alerts=[alert("ET MALWARE X", ["10.0.0.5"], ["9.9.9.9"], "threat")])
+    _j.dump(e, open(os.path.join(tmpbase, "evidence.json"), "w"))
+    t = Tools.__new__(Tools); t.base = tmpbase; t.evidence = e
+    # 캐시 없음 → replay 는 에러
+    try:
+        run.forensic(t, "replay"); assert False, "캐시 없는 replay 는 LLMError"
+    except run.LLMError:
+        pass
+    # 캐시 수동 주입(=fresh 가 저장했다 치고) 후 replay 가 그 content 를 파싱
+    payload = {"iocs": {"c2": ["9.9.9.9"]}, "victims": []}
+    msgs = run._forensic_messages(t)
+    _j.dump({"prompt_sha": run._prompt_sha(msgs), "model": run.MODEL, "think": run.THINK,
+             "content": _j.dumps(payload)}, open(os.path.join(tmpbase, "forensic_raw.json"), "w"))
+    got = run.forensic(t, "replay")
+    assert got == payload, got
+    # auto 모드 + sha 일치 → LLM 없이 캐시 재생 (여기서 ollama 를 import 하면 실패해야 정상)
+    got2 = run.forensic(t, "auto")
+    assert got2 == payload, got2
+
+
 if __name__ == "__main__":
     tests = [(k, v) for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = []

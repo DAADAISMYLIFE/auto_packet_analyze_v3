@@ -204,7 +204,8 @@ zeek는 네이티브가 없으면 **docker `zeek/zeek:latest`** 로 폴백. 출�
 ./scripts/extract_log.sh pcaps/<파일>.pcap        # → output/<name>/{suricata,zeek}
 python3 scripts/build_evidence.py <name>          # → output/<name>/evidence.json
 cd llm && python3 test_guards.py                  # 가드 유닛테스트 (ollama 불필요, 1초)
-cd llm && python3 run.py <name>                   # → reports/<name>.json   (ollama 필요)
+cd llm && python3 run.py <name>                   # → reports/<name>.json  (기본 auto: evidence 동일하면
+                                                  #   forensic 캐시 재생 = LLM 생략. --fresh 강제호출 / --replay LLM 없이 캐시만)
 cd .. && python3 scripts/make_policy.py <name> --validate   # → reports/<name>.rules
 cd llm && python3 render_report.py <name>         # → reports/<name>.md
 ```

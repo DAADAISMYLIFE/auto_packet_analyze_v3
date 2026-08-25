@@ -1,4 +1,4 @@
-import sys, json, re, os, time
+import sys, json, re, os, time, hashlib
 
 from tools import Tools, compact_evidence, is_threat_alert, is_malware_comm_alert
 from config import (MODEL, OPTS, THINK, NUM_CTX, VERDICT_SCHEMA, REPORT_SCHEMA,
@@ -118,31 +118,82 @@ def triage(tools):
                 "grounds": ["triage 출력 파싱 실패 — 안전을 위해 분석 단계로 에스컬레이트"]}
 
 
-def forensic(tools):
-    # deviations 를 먼저 읽으라고 프레이밍 — 코드가 정상(baseline) 대비 튀는 것만 랭크해 둠.
-    #   baseline 강등된 것(MS텔레메트리·광고·정상 AD RPC)은 정상이니 IOC/공격으로 올리지 말 것.
-    #   host_deviations = '공격 후 안 하던 짓 시작' = 침해/성공 판단의 1차 근거.
-    guide = ("먼저 `deviations` 를 봐라: 코드가 정상 대비 '튀는 것'만 랭크했다.\n"
-             "- deviations.top = 사건 후보(점수 높을수록 이상). deviations.host_deviations = "
-             "행동이 바뀐 내부 호스트(= 침해/성공 신호).\n"
-             "- baseline_suppressed / ad_rpc.baseline 로 강등된 것은 정상이다 — IOC·공격으로 "
-             "승격하지 마라(정상 차단 자폭 방지).\n"
-             "- alerts 의 threat_class: `threat`/`rat` 만 위협이다. `benign`(INFO/CHAT/"
-             "FILE_SHARING) 은 severity 1 이어도 위협이 아니다 — 그 IP/도메인을 iocs 에 넣지 마라.\n"
-             "- 그 다음 alerts/external/http 등 raw 로 세부를 확인하라.\n\n")
-    res = _chat("forensic", model=MODEL, format=REPORT_SCHEMA, think=THINK,
-               messages=[{"role": "system", "content": SYSTEM_PROMPT_FORENSIC},
-                         {"role": "user",
-                          "content": "Analyze this incident and return the structured JSON.\n\n"
-                                     + guide + "# Tier-1 Evidence\n" + _tier1(tools, "forensic")}],
-               options=OPTS)
+_FORENSIC_GUIDE = ("먼저 `deviations` 를 봐라: 코드가 정상 대비 '튀는 것'만 랭크했다.\n"
+    "- deviations.top = 사건 후보(점수 높을수록 이상). deviations.host_deviations = "
+    "행동이 바뀐 내부 호스트(= 침해/성공 신호).\n"
+    "- baseline_suppressed / ad_rpc.baseline 로 강등된 것은 정상이다 — IOC·공격으로 "
+    "승격하지 마라(정상 차단 자폭 방지).\n"
+    "- alerts 의 threat_class: `threat`/`rat` 만 위협이다. `benign`(INFO/CHAT/"
+    "FILE_SHARING) 은 severity 1 이어도 위협이 아니다 — 그 IP/도메인을 iocs 에 넣지 마라.\n"
+    "- 그 다음 alerts/external/http 등 raw 로 세부를 확인하라.\n\n")
+
+
+def _forensic_messages(tools):
+    """forensic chat 메시지 — 프롬프트 해시(캐시 키)의 유일한 입력."""
+    user = ("Analyze this incident and return the structured JSON.\n\n"
+            + _FORENSIC_GUIDE + "# Tier-1 Evidence\n" + _tier1(tools, "forensic"))
+    return [{"role": "system", "content": SYSTEM_PROMPT_FORENSIC},
+            {"role": "user", "content": user}]
+
+
+def _cache_path(tools):
+    return os.path.join(tools.base, "forensic_raw.json")
+
+
+def _prompt_sha(messages):
+    # 프롬프트(=system+tier1) + 모델 + think 이 같으면 forensic 출력을 재생해도 된다.
+    #   evidence·뷰·프롬프트가 바뀌면 sha 가 바뀌어 자동으로 캐시 미스(정확).
+    blob = json.dumps(messages, ensure_ascii=False, sort_keys=True) + f"|{MODEL}|think={THINK}"
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _parse_forensic(content):
     try:
-        return json.loads(res.message.content)
+        return json.loads(content)
     except (json.JSONDecodeError, TypeError):
-        print("[forensic] 구조화 JSON 파싱 실패 — content(repr):",
-              repr((res.message.content or "")[:300]))
-        print("  thinking 있었나:", bool(getattr(res.message, "thinking", None)))
+        print("[forensic] 구조화 JSON 파싱 실패 — content(repr):", repr((content or "")[:300]))
         return None
+
+
+def forensic(tools, mode="auto"):
+    """forensic 분석. mode:
+       auto   — evidence 프롬프트 해시가 캐시와 같으면 LLM 생략하고 재생(코드만 고친 반복=2초),
+                다르면 LLM 호출 후 캐시 저장. (기본)
+       fresh  — 항상 LLM 호출 + 캐시 덮어씀.
+       replay — LLM 절대 호출 안 함(ollama/ GPU 없이 로컬에서 가드·정책·score 반복). 캐시 없으면 에러.
+                프롬프트 해시가 달라도 재생하되 'stale' 경고 (가드 로직만 테스트할 때).
+    LLM 사고(케이스당 10~20분)를 매 코드 수정마다 다시 태우지 않게 하는 개발 루프 가속기."""
+    cache = _cache_path(tools)
+    cached = json.load(open(cache, encoding="utf-8")) if os.path.exists(cache) else None
+
+    if mode == "replay":
+        if not cached:
+            raise LLMError(f"replay 인데 캐시 없음: {cache} (먼저 fresh/auto 로 1회 생성)")
+        sha = None
+        try:
+            sha = _prompt_sha(_forensic_messages(tools))
+        except LLMError:
+            pass
+        stale = " ‼stale(evidence/프롬프트 변경됨 — 가드 로직만 검증용)" if sha and sha != cached.get("prompt_sha") else ""
+        print(f"[forensic] 캐시 재생 — LLM 생략{stale}  ({cache})")
+        return _parse_forensic(cached.get("content"))
+
+    messages = _forensic_messages(tools)          # _tier1 예산 초과면 여기서 LLMError (호출 전)
+    sha = _prompt_sha(messages)
+    if mode == "auto" and cached and cached.get("prompt_sha") == sha:
+        print(f"[forensic] 캐시 히트(evidence 동일) — LLM 생략, 재생  ({cache})")
+        return _parse_forensic(cached.get("content"))
+
+    res = _chat("forensic", model=MODEL, format=REPORT_SCHEMA, think=THINK,
+                messages=messages, options=OPTS)
+    content = res.message.content
+    try:
+        with open(cache, "w", encoding="utf-8") as f:
+            json.dump({"prompt_sha": sha, "model": MODEL, "think": THINK,
+                       "content": content}, f, ensure_ascii=False, indent=2)
+    except OSError as ex:
+        print(f"[forensic] 캐시 저장 실패(무시): {ex}")
+    return _parse_forensic(content)
 
 
 # =============================================================================
@@ -582,10 +633,15 @@ def upgrade_verdict(out, analysis):
 
 
 def main():
-    # 1. 매개변수로 어떤 evidence파일인지 입력 받기
-    if len(sys.argv) < 2:
-        raise SystemExit("사용법: python3 run.py <output/ 아래 evidence 폴더명>")
-    filename = sys.argv[1]
+    # 1. 인자: <case> [--fresh|--replay]
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    flags = {a for a in sys.argv[1:] if a.startswith("--")}
+    if not args:
+        raise SystemExit("사용법: python3 run.py <case> [--fresh|--replay]\n"
+                         "  (기본 auto: evidence 동일하면 forensic 캐시 재생 — 코드 수정 반복 가속)\n"
+                         "  --fresh: 항상 LLM 재호출  |  --replay: LLM 절대 호출 안 함(캐시만, 로컬 가능)")
+    filename = args[0]
+    fmode = "replay" if "--replay" in flags else ("fresh" if "--fresh" in flags else "auto")
 
     # 2. TOOLS 클래스 생성
     tools = Tools(filename)
@@ -608,10 +664,15 @@ def main():
 
     res = code_triage(tools)          # 코드가 답을 아는 경우 LLM triage 생략 (사고 토큰 수 분 절약)
     if res is None:
-        try:
-            res = triage(tools)
-        except LLMError as ex:
-            fail("triage", ex)
+        if fmode == "replay":
+            # replay 는 LLM 을 안 쓴다. 조용한 캡처의 triage 판단은 못 하므로 suspicious 바닥
+            #   (캐시된 forensic 이 있으면 어차피 에스컬레이트된 케이스 — 가드/승급이 재구성).
+            res = {"verdict": "suspicious", "grounds": ["[replay] LLM triage 생략 — suspicious 바닥"]}
+        else:
+            try:
+                res = triage(tools)
+            except LLMError as ex:
+                fail("triage", ex)
     out = {"verdict": res["verdict"], "grounds": res.get("grounds", []),
            "pipeline_status": "ok"}          # 부분 산출물(파싱 실패)과 완전 산출물을 구분
 
@@ -623,7 +684,7 @@ def main():
         print("잔여 리스크: 본 판정은 시그니처+행동 휴리스틱 커버리지 내에서만 유효함.")
     else:
         try:
-            analysis = forensic(tools)
+            analysis = forensic(tools, fmode)
         except LLMError as ex:
             fail("forensic", ex)
         if analysis:
