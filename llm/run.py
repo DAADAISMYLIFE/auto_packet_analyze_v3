@@ -128,20 +128,11 @@ def triage(tools):
                 "grounds": ["triage 출력 파싱 실패 — 안전을 위해 분석 단계로 에스컬레이트"]}
 
 
-_FORENSIC_GUIDE = ("먼저 `deviations` 를 봐라: 코드가 정상 대비 '튀는 것'만 랭크했다.\n"
-    "- deviations.top = 사건 후보(점수 높을수록 이상). deviations.host_deviations = "
-    "행동이 바뀐 내부 호스트(= 침해/성공 신호).\n"
-    "- baseline_suppressed / ad_rpc.baseline 로 강등된 것은 정상이다 — IOC·공격으로 "
-    "승격하지 마라(정상 차단 자폭 방지).\n"
-    "- alerts 의 threat_class: `threat`/`rat` 만 위협이다. `benign`(INFO/CHAT/"
-    "FILE_SHARING) 은 severity 1 이어도 위협이 아니다 — 그 IP/도메인을 iocs 에 넣지 마라.\n"
-    "- 그 다음 alerts/external/http 등 raw 로 세부를 확인하라.\n\n")
-
-
 def _forensic_messages(tools):
-    """forensic chat 메시지 — 프롬프트 해시(캐시 키)의 유일한 입력."""
+    """forensic chat 메시지 — 프롬프트 해시(캐시 키)의 유일한 입력.
+    분석 절차·판정 rubric 은 전부 forensic.md(system)에 있다 — 프롬프트는 .md 단일 소스."""
     user = ("Analyze this incident and return the structured JSON.\n\n"
-            + _FORENSIC_GUIDE + "# Tier-1 Evidence\n" + _tier1(tools, "forensic"))
+            "# Tier-1 Evidence\n" + _tier1(tools, "forensic"))
     return [{"role": "system", "content": SYSTEM_PROMPT_FORENSIC},
             {"role": "user", "content": user}]
 
