@@ -29,6 +29,27 @@ apt_prep() {   # 설치할 게 있을 때만, 한 번만 apt update
   quiet $SUDO apt-get update -y && APT_UPDATED=1
 }
 
+# ── 0) 콜드스타트 캐시 복원 (성질머리 합의 TOP1 — cp -r 표준, 심링크 금지) ──
+#   Kaggle Dataset(이름에 ollama-model-cache 포함)을 attach 해두면:
+#     models/       → ~/.ollama/models 로 통복사 (~2분) — 18GB 재다운로드(10~40분) 대체
+#     apt-archives/ → /var/cache/apt/archives 로 — suricata/zeek 다운로드 생략(설치는 함)
+#   심링크가 아니라 복사인 이유: FUSE 너머 mmap 은 어차피 18GB 를 통과하고,
+#   러너 재적재마다 재지불 + blob 스키마 가정 3개가 붙는다 (2차 심사 판정).
+CACHE_DIR="$(ls -d /kaggle/input/*ollama-model-cache* 2>/dev/null | head -1 || true)"
+if [ -n "$CACHE_DIR" ]; then
+  if [ -d "$CACHE_DIR/models" ] && [ ! -d "$HOME/.ollama/models/blobs" ]; then
+    log "캐시 복원: 모델 (cp -r, ~2분)…"
+    mkdir -p "$HOME/.ollama"
+    cp -r "$CACHE_DIR/models" "$HOME/.ollama/" && ok "모델 캐시 복원" || fail "모델 캐시 복원"
+  elif [ -d "$HOME/.ollama/models/blobs" ]; then
+    skip "모델 캐시 (이미 복원됨)"
+  fi
+  if [ -d "$CACHE_DIR/apt-archives" ]; then
+    quiet $SUDO cp -n "$CACHE_DIR"/apt-archives/*.deb /var/cache/apt/archives/ \
+      && ok "apt 캐시 복원 (다운로드 생략)" || true
+  fi
+fi
+
 # ── 1) Suricata + ET Open 룰 ─────────────────────────────────────────────────
 if command -v suricata >/dev/null 2>&1; then
   skip "suricata"
