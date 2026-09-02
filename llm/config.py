@@ -63,11 +63,14 @@ TOP_K = int(os.environ.get("TOP_K", "20"))            # qwen3.8 모델카드 권
 # 폭주 차단기 — 사고+출력 합계 상한. 실측 정상 케이스가 사고≈7k+출력≈4k 이므로 넉넉히 잡는다.
 #   너무 낮으면 사고가 예산을 다 먹고 본답이 안 나온다(ollama #14793 — 빈 응답/루프).
 NUM_PREDICT = int(os.environ.get("NUM_PREDICT", "16000"))
-NUM_BATCH = int(os.environ.get("NUM_BATCH", "1024"))  # prefill 배치 512→1024 (T4 VRAM 여유 실측 후)
+# num_batch 는 넣지 않는다(ollama 기본 512). 1024 로 올렸다가 ctx 131072 컴퓨트 버퍼가
+#   T4 잔여 VRAM(카드당 4~5GB)을 넘겨 조용한 CPU 스필 → 디코드 붕괴 실측(2026-09-02, q2 30분+).
+#   진단 셀은 num_batch 없이 돌아서 못 잡았다 — OPTS 를 바꿀 땐 러너 재적재를 유발하는
+#   옵션(num_ctx/num_batch)인지 확인하고 진단과 동일 옵션으로 검증할 것.
 
 # ollama chat 에 그대로 넘기는 옵션
 OPTS = {"temperature": TEMPERATURE, "top_p": TOP_P, "top_k": TOP_K, "seed": SEED,
-        "num_ctx": NUM_CTX, "num_predict": NUM_PREDICT, "num_batch": NUM_BATCH}
+        "num_ctx": NUM_CTX, "num_predict": NUM_PREDICT}
 
 # ── 시스템 프롬프트 (파일에서 로드) ──
 SYSTEM_PROMPT_TRIAGE = (_PROMPTS / "triage.md").read_text(encoding="utf-8")
