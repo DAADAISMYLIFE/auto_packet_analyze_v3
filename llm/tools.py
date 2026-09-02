@@ -505,10 +505,17 @@ class Tools:
     def _summarize_by_dst(rows):
         by = {}
         for h in rows:
-            d = by.setdefault(str(h.get("dst_ip")), {"dst_ip": h.get("dst_ip"), "rows": 0, "requests": 0,
+            # host + sample_url 보존 — 접힌 행도 '누구와 무엇' 은 보이게 (Wajam 실증:
+            # dst_ip 건수만 남기면 webenhancer 애드웨어가 LLM 시야에서 소멸)
+            d = by.setdefault(str(h.get("dst_ip")), {"dst_ip": h.get("dst_ip"), "host": None,
+                                                    "sample_url": None, "rows": 0, "requests": 0,
                                                     "methods": set(), "statuses": set(), "first_ts": None})
             d["rows"] += 1; d["requests"] += int(h.get("count") or 1)
             d["methods"].add(str(h.get("method"))); d["statuses"].add(str(h.get("status")))
+            url = str(h.get("url") or "")
+            if d["host"] is None and url:
+                d["host"] = url.split("/", 1)[0]
+                d["sample_url"] = url if len(url) <= 80 else url[:80] + "…"
             ts = h.get("first_ts")
             if ts is not None and (d["first_ts"] is None or ts < d["first_ts"]):
                 d["first_ts"] = ts

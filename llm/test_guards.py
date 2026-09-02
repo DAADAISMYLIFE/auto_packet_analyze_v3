@@ -438,6 +438,43 @@ def test_search_suffix_servfail_not_flagged():
     assert _search_suffixes(base) == set()      # SERVFAIL 이면 마커 있어도 실격
 
 
+# ─────────────── S0 죽은-비콘 승격기 (반례 '쌍' — overfit 감시관 원칙) ───────────────
+def _beacon_ev(dst="9.9.9.10", conns=500, span=7200.0, bytes_in=0, reg=90.0,
+               duration=86400.0):
+    e = ev(hosts=[WS], ext_ips=[dst] if "." in dst else [])
+    e["meta"] = {"duration_s": duration}
+    e["anomalies"] = {"beacons": [{"dst": dst, "port": 80, "conns": conns, "span_s": span,
+                                    "total_bytes_in": bytes_in, "s0_ratio": 1.0 if bytes_in == 0 else 0.0,
+                                    "regularity_pct": reg, "jitter_pct": 200.0,
+                                    "interval_avg_s": 100.0, "median_interval_s": 13.0,
+                                    "total_bytes_out": 0}]}
+    return e
+
+def _empty_analysis():
+    return {"victims": [], "attacks": [],
+            "iocs": {"c2": [], "delivery": [], "exfil": [], "domains": [], "hashes": []}}
+
+
+def test_dead_beacon_promoted():
+    a = _empty_analysis()
+    run.attach_dead_beacons(a, ctx_for(a, _beacon_ev()))
+    assert a["iocs"]["c2"] == ["9.9.9.10"] and a["_iocs_added_dead_beacon"] == ["9.9.9.10"]
+
+
+def test_dead_beacon_counterexamples_not_promoted():
+    # 쌍 원칙: 승격 케이스와 나란히, 정당한 비승격 4종 — 다음 오탐 때 게이트를 도로 풀지 않게
+    cases = {
+        "지수 백오프(불규칙)": _beacon_ev(reg=25.0),
+        "살아있는 채널": _beacon_ev(bytes_in=50_000),
+        "짧은 캡처(세션 중간)": _beacon_ev(duration=1800.0),
+        "멀티캐스트": _beacon_ev(dst="ff02::1:2"),
+    }
+    for name, e in cases.items():
+        a = _empty_analysis()
+        run.attach_dead_beacons(a, ctx_for(a, e))
+        assert a["iocs"]["c2"] == [], f"{name} 가 승격됨 — 오탐"
+
+
 # ─────────────── P0: precision 헬퍼 + 코드-only floor ───────────────
 def test_score_precision_semantics():
     import sys as _s, os as _o

@@ -296,6 +296,56 @@ def attach_identity(analysis, ctx):
         analysis["patient_zero"] = clean_ip(analysis["patient_zero"])
 
 
+# S0 죽은-비콘 승격 임계 (전부 일반형 — overfit 감시관 조건 반영):
+#   주기성(중앙값 규칙성)이 핵심 판별자 — 고정주기 재시도(멀웨어 비콘) vs 지수 백오프(정상 재시도).
+#   duration 게이트 — 짧은 캡처는 세션 중간 시작이라 '캡처 전 해석된 정상 SaaS + 장애' 를
+#   no-DNS 죽은비콘으로 오인할 수 있음(그 경우 승격 대신 anomaly 노출로 유보).
+DEAD_BEACON_MIN_CONNS = 100
+DEAD_BEACON_MIN_SPAN_S = 3600
+DEAD_BEACON_MIN_REGULARITY = 60.0
+DEAD_BEACON_MIN_CAPTURE_S = 7200
+
+
+def attach_dead_beacons(analysis, ctx):
+    """죽은 C2 비콘 승격 (코드 소유): 장시간·고빈도·규칙적 재시도인데 응답이 전혀 없는 외부
+    직결 목적지 = 하드코딩된 죽은 C2 (q2 실증: 94.242.254.208 — 13초 버스트 773회 24h 전무응답,
+    어떤 시그니처/보고서도 못 잡던 IOC). 반례 쌍 테스트로 잠금: 지수 백오프·생존 채널·짧은
+    캡처·멀티캐스트는 승격 안 함."""
+    ev = ctx.tools.evidence
+    if (ev.get("meta", {}).get("duration_s") or 0) < DEAD_BEACON_MIN_CAPTURE_S:
+        return                                        # 짧은 캡처 — 판단 유보 (오탐 게이트)
+    import ipaddress
+    iocs = analysis.setdefault("iocs", {})
+    iocs.setdefault("c2", [])
+    have = {str(x).lower() for b in ("c2", "delivery", "exfil") for x in iocs.get(b, [])}
+    added = []
+    for b in (ev.get("anomalies", {}).get("beacons") or []):
+        dst = str(b.get("dst") or "").lower()
+        try:
+            addr = ipaddress.ip_address(dst)
+            # is_global 만으론 부족 — 파이썬 stdlib 기벽으로 ff02::(링크로컬 멀티캐스트)가
+            # is_global=True 로 나온다(실측). 멀티캐스트 명시 제외.
+            if not addr.is_global or addr.is_multicast:
+                continue
+        except ValueError:
+            continue
+        dead = (b.get("total_bytes_in") or 0) == 0 or (b.get("s0_ratio") or 0) >= 0.9
+        if not dead:
+            continue
+        if (b.get("conns") or 0) < DEAD_BEACON_MIN_CONNS:
+            continue
+        if (b.get("span_s") or 0) < DEAD_BEACON_MIN_SPAN_S:
+            continue
+        if (b.get("regularity_pct") or 0) < DEAD_BEACON_MIN_REGULARITY:
+            continue                                  # 백오프(불규칙) — 정상 재시도 오탐 방지
+        if dst in ctx.internal_ips or dst in ctx.attack_targets or dst in have:
+            continue
+        added.append(dst); have.add(dst)
+    if added:
+        iocs["c2"].extend(sorted(added))
+        analysis.setdefault("_iocs_added_dead_beacon", []).extend(sorted(added))
+
+
 def demote_infra_victims(analysis, ctx):
     """인프라(DC/DNS)를 '피해자'로 부르는 자폭 방지 (코드 소유).
 
@@ -600,6 +650,7 @@ PASSES = [
     attach_iocs_from_alerts,    # 위협-카테고리 alert 의 외부 IP → c2
     attach_iocs_from_dns,       # 의심 TLD 도메인 + IP (HTTPS-only 후속 C2)
     attach_inbound_threat_ips,  # 인바운드 공격자 IP
+    attach_dead_beacons,        # 죽은 C2 비콘 (규칙적·장시간·전무응답 직결)
 ]
 
 

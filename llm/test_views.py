@@ -89,6 +89,35 @@ def test_level3_and_4_summaries_keep_totals():
     assert v4["_view"]["signal_rows"] == 1 and v4["_view"]["other_rows"] == 4
 
 
+def test_cap_representation_and_inbound_both_survive():
+    """계약 쌍(overfit 감시관): 캡 포화 인바운드 공격 + 침묵 호스트 다수 → 둘 다 생존.
+    예약석이 tier 최소 할당을 침범하지 않고, 침묵 호스트도 투명인간이 안 된다."""
+    import sys as _s, os as _o
+    _s.path.insert(0, _o.path.join(_o.path.dirname(_o.path.abspath(__file__)), "..", "scripts"))
+    from build_evidence import signal_priority_cap
+    inbound = [{"url": f"10.0.0.9/atk{i}", "first_ts": float(i), "count": 1, "_in": True}
+               for i in range(150)]
+    noise = [{"url": f"n{i}.example/x", "first_ts": 500.0 + i, "count": 1, "_in": False}
+             for i in range(150)]                    # 노이즈가 시간상 먼저 — 시간순 운빨 차단
+    silent = [{"url": f"quiethost.example/u{i}", "first_ts": 5000.0 + i, "count": 40, "_in": False}
+              for i in range(3)]
+    trunc = {}
+    got = signal_priority_cap(inbound + silent + noise, 100, trunc, "t",
+                              priority=lambda x: 100 if x["_in"] else 0,
+                              host_of=lambda x: str(x.get("url")).split("/", 1)[0])
+    urls = [g["url"] for g in got]
+    assert sum(1 for u in urls if u.startswith("10.0.0.9/")) >= 40      # tier 최소 할당(예약 공제 후) 보장
+    assert any(u.startswith("quiethost.example/") for u in urls), trunc  # 침묵 호스트 대표 생존
+    assert trunc.get("t_repr_added", 0) >= 1
+
+
+def test_summary_keeps_host_identity():
+    rows = [http_row("wajam.example/webenhancer/update?v=1", "1.2.3.4", count=40)]
+    t = FakeTools(with_http(rows))
+    summ = t._summarize_by_dst(rows)
+    assert summ[0]["host"] == "wajam.example" and "webenhancer" in summ[0]["sample_url"]
+
+
 def test_estimator_is_digit_aware():
     assert estimate_tokens("192.168.0.1") >= 11          # 8 자릿수 + 점 3 (3.3자/토큰이면 3)
     assert estimate_tokens("hello world") < 6

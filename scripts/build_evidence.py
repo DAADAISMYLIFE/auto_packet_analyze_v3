@@ -71,6 +71,66 @@ LM_LOGS = ["smb_files.log", "smb_mapping.log", "dce_rpc.log",
            "ldap_search.log", "ldap.log", "kerberos.log", "ntlm.log"]
 
 
+PRI_NAME = {100: "inbound", 80: "threat-alert", 60: "anomaly-dst", 50: "susp-tld",
+            40: "web-pattern", 20: "has-body", 0: "rest"}
+
+
+def _by_time(items):
+    return sorted(items, key=lambda x: (x["first_ts"] is None, x["first_ts"]))
+
+
+def signal_priority_cap(items, cap, trunc, label, priority, host_of=None, reserve_pct=15):
+    """신호 우선 cap (모듈 레벨 — 계약 테스트 대상).
+    (1) 비어있지 않은 tier 마다 cap//tier수 최소 할당(시간순) — 스캔 폭풍의 cap 독식 방지.
+    (2) host_of 가 주어지면(http) '대표성 예약석': 아직 미대표인 목적지 호스트를 요청량
+        내림차순으로 1행씩, cap 의 reserve_pct% 까지 — 신호 없는 호스트의 트래픽 전체가
+        투명인간이 되는 것 방지(Wajam 조사 실증: raw 155개 호스트 중 41개만 evidence 진입).
+        overfit 감시관 조건: 예약은 tier 최소 할당 '이후' 잔여에서 — 공격 행 최소치 불침범.
+    (3) 남은 슬롯은 우선순위 순.
+    탈락은 tier 별 건수로, 예약석 유입은 별도 카운트로 _truncation 에 기록."""
+    if len(items) <= cap:
+        return _by_time(items)
+    tiers = {}
+    for x in items:
+        tiers.setdefault(priority(x), []).append(x)
+    for t in tiers.values():
+        t.sort(key=lambda x: (x["first_ts"] is None, x["first_ts"]))
+    order = sorted(tiers, reverse=True)
+    # 예약석을 먼저 공제한 뒤 tier 최소 할당 — 안 그러면 tier floor 가 cap 전체를 소진해
+    # 예약 예산이 항상 0 이 된다. tier 최소치는 (cap-예약)//tier수 로 '보장'이 유지된다.
+    reserve_budget = (cap * reserve_pct // 100) if host_of else 0
+    floor = max(1, (cap - reserve_budget) // len(order))
+    chosen, remaining = [], cap
+    for p in order:                                  # (1) tier 별 최소 할당
+        take = tiers[p][:floor]
+        chosen += take; tiers[p] = tiers[p][floor:]; remaining -= len(take)
+    repr_added = 0
+    if host_of and remaining > 0:                    # (2) 대표성 예약석 (tier 최소 할당 이후)
+        seen_hosts = {host_of(x) for x in chosen}
+        by_host = {}
+        for p in order:
+            for x in tiers[p]:
+                h = host_of(x)
+                if h and h not in seen_hosts:
+                    cur = by_host.get(h)
+                    if cur is None or (x.get("count") or 1) > (cur[0].get("count") or 1):
+                        by_host[h] = (x, p)
+        budget = min(reserve_budget, remaining)
+        for h, (x, p) in sorted(by_host.items(),
+                                key=lambda kv: -(kv[1][0].get("count") or 1))[:budget]:
+            chosen.append(x); tiers[p].remove(x); remaining -= 1; repr_added += 1
+    for p in order:                                  # (3) 남은 슬롯은 우선순위 순
+        if remaining <= 0:
+            break
+        take = tiers[p][:remaining]
+        chosen += take; tiers[p] = tiers[p][remaining:]; remaining -= len(take)
+    trunc[label] = len(items) - len(chosen)
+    trunc[label + "_by_tier"] = {PRI_NAME.get(p, str(p)): len(v) for p, v in tiers.items() if v}
+    if repr_added:
+        trunc[label + "_repr_added"] = repr_added
+    return _by_time(chosen)
+
+
 # ---------------------------------------------------------------------------
 def read_ndjson(path):
     """NDJSON(.log/eve.json) → list[dict]. 없으면 []."""
@@ -165,11 +225,16 @@ def build_anomalies(conn, hosts, dns_recs):
     # 1) 비콘 주기성: 외부 (dst,port)별 연결 간격의 지터. 낮을수록 기계적 주기 접속.
     grp = defaultdict(list)      # (dst, port) -> [ts...]
     grp_bytes = defaultdict(int)
+    grp_in = defaultdict(int)
+    grp_s0 = defaultdict(int)
     for d in ext:
         key = (d["id.resp_h"], d.get("id.resp_p"))
         if d.get("ts"):
             grp[key].append(d["ts"])
         grp_bytes[key] += d.get("orig_bytes") or 0
+        grp_in[key] += d.get("resp_bytes") or 0
+        if d.get("conn_state") in ("S0", "REJ"):
+            grp_s0[key] += 1
     beacons = []
     for (dst, port), tss in grp.items():
         if len(tss) < ANOM_BEACON_MIN_CONNS:
@@ -180,11 +245,22 @@ def build_anomalies(conn, hosts, dns_recs):
         if mean <= 0:
             continue
         stdev = statistics.pstdev(ivals)
+        med = statistics.median(ivals)
+        # 중앙값 규칙성: 간격 중 중앙값 ±50% 안 비율. 고정주기 비콘(수면 껴도 버스트는 규칙적)은
+        # 높고, 지수 백오프(간격이 계속 자람)는 낮다 — CV 는 수면 갭에 오염돼 이 구분을 못 함
+        # (q2 실측: 죽은비콘 median 13.1s 인데 CV 200%). overfit 감시관의 '주기성 복원' 이행.
+        reg = (sum(1 for v in ivals if med * 0.5 <= v <= med * 1.5) / len(ivals) * 100) if med > 0 else 0.0
         beacons.append({"dst": dst, "port": port, "conns": len(tss),
                         "interval_avg_s": round(mean, 2),
+                        "median_interval_s": round(med, 2),
+                        "regularity_pct": round(reg, 1),
                         "jitter_pct": round(stdev / mean * 100, 1),
-                        "total_bytes_out": grp_bytes[(dst, port)]})
-    beacons.sort(key=lambda x: x["jitter_pct"])         # 기계적인 것부터
+                        "span_s": round(tss[-1] - tss[0], 1),
+                        "total_bytes_out": grp_bytes[(dst, port)],
+                        "total_bytes_in": grp_in[(dst, port)],
+                        "s0_ratio": round(grp_s0[(dst, port)] / len(tss), 2)})
+    # 죽은 채널(응답 0) 우선, 그 안에서 기계적인 것부터 — cap(15)에 죽은비콘이 밀리지 않게
+    beacons.sort(key=lambda x: (x["total_bytes_in"] > 0, x["jitter_pct"]))
 
     # 2) 업로드 비율: 외부 dst 별 송신/수신 바이트. 송신 압도 = 유출 후보.
     updown = defaultdict(lambda: {"out": 0, "in": 0, "flows": 0})
@@ -926,48 +1002,17 @@ def build_evidence(name, root="/home/qkekdhd/auto_packet_analyze_v3"):
     def pri_sni(x):
         return 60 if _susp_tld.search(str(x.get("sni") or "")) else 0
 
-    def by_time(items):
-        return sorted(items, key=lambda x: (x["first_ts"] is None, x["first_ts"]))
+    def capped(d, cap, label, priority, host_of=None):
+        return signal_priority_cap(list(d.values()), cap, trunc, label, priority, host_of=host_of)
 
-    PRI_NAME = {100: "inbound", 80: "threat-alert", 60: "anomaly-dst", 50: "susp-tld",
-                40: "web-pattern", 20: "has-body", 0: "rest"}
-
-    def capped(d, cap, label, priority):
-        """신호 우선 cap — 단, tier 별 '최소 할당'을 먼저 보장한다.
-        순수 우선순위 정렬은 스캔 폭풍(인바운드 1,000건)이 cap 을 독식해 아웃바운드 C2 행이
-        통째로 밀려나는 반대 손실을 만든다(q2 실측). 그래서 (1) 비어있지 않은 tier 마다
-        cap//tier수 를 시간순으로 먼저 채우고, (2) 남은 슬롯을 우선순위 순으로 준다.
-        tier 별 탈락 건수를 _truncation 에 남겨 '뭘 못 봤는지'를 알린다."""
-        items = list(d.values())
-        if len(items) <= cap:
-            return by_time(items)
-        tiers = {}
-        for x in items:
-            tiers.setdefault(priority(x), []).append(x)
-        for t in tiers.values():
-            t.sort(key=lambda x: (x["first_ts"] is None, x["first_ts"]))
-        order = sorted(tiers, reverse=True)
-        floor = cap // len(order)
-        chosen, remaining = [], cap
-        for p in order:                                  # (1) tier 별 최소 할당
-            take = tiers[p][:floor]
-            chosen += take; tiers[p] = tiers[p][floor:]; remaining -= len(take)
-        for p in order:                                  # (2) 남은 슬롯은 우선순위 순
-            if remaining <= 0:
-                break
-            take = tiers[p][:remaining]
-            chosen += take; tiers[p] = tiers[p][remaining:]; remaining -= len(take)
-        trunc[label] = len(items) - len(chosen)
-        trunc[label + "_by_tier"] = {PRI_NAME.get(p, str(p)): len(v) for p, v in tiers.items() if v}
-        return by_time(chosen)
-
-    full_external = {"ips": by_time(ext_ip.values()), "domains": by_time(ext_dom.values()),
-                     "sni": by_time(ext_sni.values()), "http": by_time(ext_http.values())}
+    full_external = {"ips": _by_time(ext_ip.values()), "domains": _by_time(ext_dom.values()),
+                     "sni": _by_time(ext_sni.values()), "http": _by_time(ext_http.values())}
     external = {
         "ips": capped(ext_ip, CAP_EXTERNAL_IPS, "external_ips_dropped", pri_ip),
         "domains": capped(ext_dom, CAP_EXTERNAL_DOMAINS, "external_domains_dropped", pri_dom),
         "sni": capped(ext_sni, CAP_EXTERNAL_SNI, "external_sni_dropped", pri_sni),
-        "http": capped(ext_http, CAP_EXTERNAL_HTTP, "external_http_dropped", pri_http),
+        "http": capped(ext_http, CAP_EXTERNAL_HTTP, "external_http_dropped", pri_http,
+                       host_of=lambda x: host_of_url(x.get("url"))),
     }
     if trunc:
         trunc["_policy"] = "signal-priority cap: inbound > threat-alert > anomaly-dst > susp-tld > web-pattern > time"
