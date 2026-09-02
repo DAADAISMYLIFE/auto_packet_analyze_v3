@@ -89,6 +89,7 @@ def _chat(stage, **kw):
     실측을 찍는다. '15분이 어디로 가는가'를 감이 아니라 숫자로 — 사고 토큰은 decode 에 포함되므로
     decode 가 크면 사고가 범인, prefill 이 크면 evidence 크기가 범인이다."""
     from ollama import chat
+    print(f"[llm:{stage}] 호출 시작 — 사고+생성 수 분~수십 분, 완료 시 계측 줄 출력", flush=True)
     t0 = time.time()
     try:
         res = chat(**kw)
