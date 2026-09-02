@@ -63,7 +63,7 @@ LLM(특히 로컬 26~27B)은 IP/도메인/해시를 **베끼다 손상**시키�
 ## 디렉터리 구조
 
 ```
-setup.sh                     # suricata/zeek/ollama 설치 + 모델 pull
+setup.sh                     # 조용·멱등 설치(suricata/zeek/ollama/모델/pip) — 상세는 setup.log, LLM 스모크 없음
 .env                         # MODEL / NUM_CTX / TEMPERATURE / SEED (설정 단일 소스)
 scripts/
   run_suricata.sh            # pcap → suricata eve.json
@@ -211,8 +211,8 @@ cd llm && python3 render_report.py <name>         # → reports/<name>.md
 ```
 
 ### Kaggle
-`kaggle/run_pipeline.ipynb` — Settings에서 **Internet ON + GPU**, pcap 데이터셋 Add Input, Run All.
-재실행은 "★ 재실행 시작점" 셀부터(코드/`.env` 최신화 후 pcap마다 전 단계 자동).
+`kaggle/run_pipeline.ipynb` — Settings에서 **Internet ON + GPU**, pcap 데이터셋 Add Input, **항상 Run All**.
+모든 셀이 멱등(설치·pull 은 돼 있으면 몇 초에 건너뜀, forensic 은 evidence 동일하면 캐시 재생)이라 재실행 시작점 개념이 없다.
 
 ---
 

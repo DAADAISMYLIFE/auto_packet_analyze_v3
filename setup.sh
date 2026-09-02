@@ -1,142 +1,116 @@
 #!/usr/bin/env bash
 # =============================================================================
-# auto_packet_analyze_v3 setup
-#   1) Suricata + ET Open 룰 (scripts/run_suricata.sh 용)
-#   2) Zeek                  (scripts/run_zeek.sh 용)
-#   3) Ollama 런타임
-#   4) LLM 모델 pull
-#   5) llm/test.py 로 응답 확인
-#
-# 사용법:  ./setup.sh
-#   - sudo 권한 필요(apt 설치). 중간에 비밀번호를 물어볼 수 있음.
-#   - 여러 번 실행해도 안전(idempotent).
+# auto_packet_analyze_v3 setup — 조용한 멱등 설치
+#   - 전부 깔려 있으면 몇 초 안에 통과한다 (항상 다시 실행해도 됨).
+#   - 상세 출력(apt/다운로드 진행바)은 전부 setup.log 로 보내고,
+#     화면에는 ✓(설치됨) / ∙(건너뜀) / ✗(실패) 한 줄씩만 찍는다.
+#   - LLM 스모크 콜은 하지 않는다 — 모델 응답/format 검증은 노트북 진단 셀이
+#     파이프라인과 '동일 옵션'으로 수행한다 (여기서 하면 중복 + 수 분 낭비).
+# 사용법: ./setup.sh            (MODEL 환경변수로 모델 덮어쓰기)
 # =============================================================================
-set -euo pipefail
+set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-VENV="$ROOT/venv"
-MODEL="${MODEL:-gemma4:26b}"   # 일단 gemma4:26b로 명시 (MODEL 환경변수로 덮어쓰기 가능)
-UBU_CODENAME="$(. /etc/os-release && echo "${VERSION_ID}")"
+MODEL="${MODEL:-gemma4:26b}"
+LOG="$ROOT/setup.log"
+: > "$LOG"
+FAILED=0
 
-log()  { echo -e "\n\033[1;36m[setup]\033[0m $*"; }
-ok()   { echo -e "\033[1;32m  ✓\033[0m $*"; }
-warn() { echo -e "\033[1;33m  ! \033[0m$*"; }
-
-# sudo 헬퍼: root면 그냥 실행, 아니면 sudo
 if [ "$(id -u)" -eq 0 ]; then SUDO=""; else SUDO="sudo"; fi
+log()   { echo -e "\033[1;36m[setup]\033[0m $*"; }
+ok()    { echo -e "  \033[1;32m✓\033[0m $*"; }
+skip()  { echo -e "  \033[1;90m∙\033[0m $* — 이미 있음, 건너뜀"; }
+fail()  { echo -e "  \033[1;31m✗\033[0m $* — $LOG 끝부분 확인"; FAILED=1; }
+quiet() { "$@" >>"$LOG" 2>&1; }
 
-# -----------------------------------------------------------------------------
-log "0/5  apt 갱신"
-$SUDO apt-get update -y
-$SUDO apt-get install -y curl gnupg ca-certificates lsb-release software-properties-common
-$SUDO apt-get install -y zstd
+APT_UPDATED=0
+apt_prep() {   # 설치할 게 있을 때만, 한 번만 apt update
+  [ "$APT_UPDATED" = 1 ] && return 0
+  quiet $SUDO apt-get update -y && APT_UPDATED=1
+}
 
-# -----------------------------------------------------------------------------
-# 1) Suricata + 룰
-# -----------------------------------------------------------------------------
-log "1/5  Suricata 설치 + 룰 업데이트"
-if ! command -v suricata >/dev/null 2>&1; then
-  $SUDO add-apt-repository -y ppa:oisf/suricata-stable || true
-  $SUDO apt-get update -y
-  $SUDO apt-get install -y suricata
+# ── 1) Suricata + ET Open 룰 ─────────────────────────────────────────────────
+if command -v suricata >/dev/null 2>&1; then
+  skip "suricata"
 else
-  ok "suricata 이미 설치됨 ($(suricata -V 2>/dev/null | head -1))"
+  log "suricata 설치 중…"
+  apt_prep
+  quiet $SUDO apt-get install -y curl gnupg ca-certificates lsb-release \
+        software-properties-common zstd
+  quiet $SUDO add-apt-repository -y ppa:oisf/suricata-stable
+  quiet $SUDO apt-get update -y
+  quiet $SUDO apt-get install -y suricata && ok "suricata" || fail "suricata"
+fi
+if [ -s /var/lib/suricata/rules/suricata.rules ]; then
+  skip "ET Open 룰"
+else
+  log "ET Open 룰 다운로드 중…"
+  quiet $SUDO suricata-update --no-test \
+    && ok "ET Open 룰" || fail "ET Open 룰 (run_suricata.sh 는 yaml 기본 룰로 폴백)"
 fi
 
-# ET Open 룰을 /var/lib/suricata/rules/suricata.rules 에 채움
-#   (run_suricata.sh 가 -S 로 이 파일을 직접 로드해서 alert를 받음)
-if command -v suricata-update >/dev/null 2>&1; then
-  $SUDO suricata-update --no-test || warn "suricata-update 실패(네트워크?) — yaml 기본 룰로 폴백"
-else
-  warn "suricata-update 없음 — 룰 자동 갱신 건너뜀"
-fi
-[ -s /var/lib/suricata/rules/suricata.rules ] \
-  && ok "룰 파일 준비됨: /var/lib/suricata/rules/suricata.rules" \
-  || warn "룰 파일 없음 — run_suricata.sh 가 yaml 기본 룰로 동작함"
-
-# -----------------------------------------------------------------------------
-# 2) Zeek
-# -----------------------------------------------------------------------------
-log "2/5  Zeek 설치"
+# ── 2) Zeek ──────────────────────────────────────────────────────────────────
 if command -v zeek >/dev/null 2>&1; then
-  ok "zeek 이미 설치됨 ($(zeek --version 2>/dev/null | head -1))"
+  skip "zeek"
 else
-  # 공식 OpenSUSE OBS 저장소 (Ubuntu 22.04 → xUbuntu_22.04)
-  REPO="https://download.opensuse.org/repositories/security:/zeek/xUbuntu_${UBU_CODENAME}"
-  $SUDO mkdir -p /etc/apt/keyrings
-  curl -fsSL "${REPO}/Release.key" \
-    | gpg --dearmor \
-    | $SUDO tee /etc/apt/keyrings/zeek.gpg >/dev/null
-  echo "deb [signed-by=/etc/apt/keyrings/zeek.gpg] ${REPO}/ /" \
+  log "zeek 설치 중…"
+  UBU="$(. /etc/os-release && echo "${VERSION_ID}")"
+  ZREPO="https://download.opensuse.org/repositories/security:/zeek/xUbuntu_${UBU}"
+  apt_prep
+  quiet $SUDO mkdir -p /etc/apt/keyrings
+  { curl -fsSL "${ZREPO}/Release.key" | gpg --dearmor \
+      | $SUDO tee /etc/apt/keyrings/zeek.gpg >/dev/null; } 2>>"$LOG"
+  echo "deb [signed-by=/etc/apt/keyrings/zeek.gpg] ${ZREPO}/ /" \
     | $SUDO tee /etc/apt/sources.list.d/security-zeek.list >/dev/null
-  $SUDO apt-get update -y
-  $SUDO apt-get install -y zeek
-
-  # zeek 는 /opt/zeek/bin 에 설치됨 → PATH 에 노출 (run_zeek.sh 의 command -v zeek 용)
+  quiet $SUDO apt-get update -y
+  quiet $SUDO apt-get install -y zeek
   if [ -x /opt/zeek/bin/zeek ] && ! command -v zeek >/dev/null 2>&1; then
-    $SUDO ln -sf /opt/zeek/bin/zeek     /usr/local/bin/zeek
+    $SUDO ln -sf /opt/zeek/bin/zeek /usr/local/bin/zeek
     $SUDO ln -sf /opt/zeek/bin/zeek-cut /usr/local/bin/zeek-cut 2>/dev/null || true
   fi
-  command -v zeek >/dev/null 2>&1 \
-    && ok "zeek 설치 완료 ($(zeek --version 2>/dev/null | head -1))" \
-    || warn "zeek 가 PATH 에 없음 — /opt/zeek/bin 을 PATH 에 추가하세요"
+  command -v zeek >/dev/null 2>&1 && ok "zeek" || fail "zeek"
 fi
 
-# -----------------------------------------------------------------------------
-# 3) Ollama
-# -----------------------------------------------------------------------------
-log "3/5  Ollama 설치"
+# ── 3) Ollama 런타임 + 서버 ──────────────────────────────────────────────────
 if command -v ollama >/dev/null 2>&1; then
-  ok "ollama 이미 설치됨 ($(ollama --version 2>/dev/null | head -1))"
+  skip "ollama"
 else
-  curl -fsSL https://ollama.com/install.sh | sh
+  log "ollama 설치 중…"
+  { curl -fsSL https://ollama.com/install.sh | sh; } >>"$LOG" 2>&1 \
+    && ok "ollama" || fail "ollama"
 fi
-
-# ollama 서버 기동 확인 (WSL 등 systemd 없는 환경 대비)
-if ! curl -fsS http://localhost:11434/api/version >/dev/null 2>&1; then
-  log "ollama 서버 기동 (백그라운드)"
-  if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files 2>/dev/null | grep -q '^ollama'; then
-    $SUDO systemctl enable --now ollama || true
-  fi
-  # 그래도 안 떠 있으면 직접 띄움
-  if ! curl -fsS http://localhost:11434/api/version >/dev/null 2>&1; then
-    nohup ollama serve >"$ROOT/ollama.log" 2>&1 &
-  fi
-  # 최대 30초 대기
+if curl -fsS http://localhost:11434/api/version >/dev/null 2>&1; then
+  skip "ollama 서버"
+else
+  log "ollama 서버 기동…"
+  nohup ollama serve >>"$LOG" 2>&1 &
   for _ in $(seq 1 30); do
     curl -fsS http://localhost:11434/api/version >/dev/null 2>&1 && break
     sleep 1
   done
+  curl -fsS http://localhost:11434/api/version >/dev/null 2>&1 \
+    && ok "ollama 서버" || fail "ollama 서버"
 fi
-curl -fsS http://localhost:11434/api/version >/dev/null 2>&1 \
-  && ok "ollama 서버 응답 OK" \
-  || warn "ollama 서버가 응답하지 않음 — 'ollama serve' 를 수동 실행하세요"
 
-# -----------------------------------------------------------------------------
-# 4) 모델 pull
-# -----------------------------------------------------------------------------
-log "4/5  모델 pull: $MODEL"
+# ── 4) 모델 + 파이썬 의존성 ──────────────────────────────────────────────────
 if ollama list 2>/dev/null | awk '{print $1}' | grep -qx "$MODEL"; then
-  ok "$MODEL 이미 존재"
+  skip "모델 $MODEL"
 else
-  ollama pull "$MODEL"
+  log "모델 pull: $MODEL (진행바는 $LOG 로 — 수 분~수십 분)"
+  quiet ollama pull "$MODEL" && ok "모델 $MODEL" || fail "모델 $MODEL"
 fi
 
-# -----------------------------------------------------------------------------
-# 5) test.py 실행
-# -----------------------------------------------------------------------------
-log "5/5  llm/test.py 실행 (응답 확인)"
-# venv 의 ollama 파이썬 패키지를 사용
-if [ -x "$VENV/bin/python" ]; then
-  PY="$VENV/bin/python"
+PY="$(command -v python3)"
+if "$PY" -c "import ollama" >/dev/null 2>&1; then
+  skip "python ollama 클라이언트"
 else
-  PY="python3"
-  "$PY" -m pip install --quiet ollama || warn "ollama 파이썬 패키지 설치 실패"
+  quiet "$PY" -m pip install -qU ollama \
+    || quiet "$PY" -m pip install -qU --break-system-packages ollama
+  "$PY" -c "import ollama" 2>>"$LOG" \
+    && ok "python ollama 클라이언트" || fail "python ollama 클라이언트"
 fi
+quiet "$PY" -c "import sys; sys.path.insert(0, '$ROOT/llm'); import config" \
+  && ok "config 로드 (.env 유효)" || fail "config 로드 (.env 값 확인)"
 
-"$PY" "$ROOT/llm/test.py"
-
-log "✅ 셋업 완료"
-echo "  - Suricata : $ROOT/scripts/run_suricata.sh <pcap>"
-echo "  - Zeek     : $ROOT/scripts/run_zeek.sh <pcap>"
-echo "  - 모델     : $MODEL"
+if [ "$FAILED" = 0 ]; then log "✅ 셋업 완료 (모델: $MODEL)"; else log "⚠ 일부 실패 — $LOG 확인"; fi
+exit "$FAILED"

@@ -20,7 +20,7 @@ pcap을 넣으면 자동으로 네트워크 포렌식 분석을 수행하고, �
 
 ## 구조
 ```
-setup.sh                 # suricata/zeek/ollama 설치 + 모델 pull + test.py 실행
+setup.sh                 # suricata/zeek/ollama 설치 + 모델 pull (조용·멱등 — 깔려 있으면 몇 초에 통과)
 scripts/
   run_suricata.sh        # pcap → suricata eve.json (OUT_DIR 로 출력경로 지정 가능)
   run_zeek.sh            # pcap → zeek NDJSON 로그 (native 또는 docker)
