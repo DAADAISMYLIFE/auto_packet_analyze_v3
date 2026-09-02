@@ -394,6 +394,50 @@ def test_forensic_cache_roundtrip(tmpbase="/tmp/claude-1000/-home-qkekdhd-slm-au
     assert got2 == payload, got2
 
 
+# ─────────────── DNS 검색 접미사 (일반형, overfit 감시관 반영) ───────────────
+def _dev_with_suffix(sfx):
+    return {"top": [], "host_deviations": [], "baseline_suppressed": {"count": 0},
+            "dns_search_suffix": {"list": [sfx]}}
+
+
+def test_search_suffix_rejected_from_iocs():
+    """LLM 이 검색 접미사 도메인을 IOC 로 올려도 ground_iocs 가 기각 (pwned.se 실증)."""
+    e = ev(hosts=[WS], domains=[("wpad.corp.lan", []), ("x.corp.lan", [])])
+    e["deviations"] = _dev_with_suffix("corp.lan")
+    a = {"iocs": {"c2": [], "delivery": [], "exfil": [], "domains": ["corp.lan", "sub.corp.lan"], "hashes": []}}
+    ground_iocs(a, ctx_for(a, e))
+    assert a["iocs"]["domains"] == [], a
+    assert any("검색 접미사" in r["reason"] for r in a.get("_rejected_iocs", []))
+
+
+def test_search_suffix_marker_required():
+    """baseline: 마커(wpad/isatap/호스트명) 없이 다중호스트만으론 접미사 판정 안 됨
+    (overfit 감시관: 다중 감염이 죽은 C2 를 질의해도 면죄부 금지)."""
+    import sys as _s, os as _o
+    _s.path.insert(0, _o.path.join(_o.path.dirname(_o.path.abspath(__file__)), "..", "scripts"))
+    from baseline import _search_suffixes
+    # NXDOMAIN 3종 + 2호스트지만 마커 없음 → 접미사 아님
+    base = {"hosts": [{"ip": "10.0.0.5"}, {"ip": "10.0.0.6"}], "external": {"domains": [
+        {"query": f"{x}.deadc2.gq", "answered": False, "rcodes": ["NXDOMAIN"],
+         "srcs": ["10.0.0.5", "10.0.0.6"]} for x in ("aaa", "bbb", "ccc")]}}
+    assert _search_suffixes(base) == set()
+    # wpad 마커 추가 → 접미사
+    base["external"]["domains"].append(
+        {"query": "wpad.deadc2.gq", "answered": False, "rcodes": ["NXDOMAIN"], "srcs": ["10.0.0.5"]})
+    assert "deadc2.gq" in _search_suffixes(base)
+
+
+def test_search_suffix_servfail_not_flagged():
+    """SERVFAIL(죽은 도메인/DGA)은 NXDOMAIN(존재안함)과 달라 접미사 아님 — 워드샐러드 .org 실증."""
+    import sys as _s, os as _o
+    _s.path.insert(0, _o.path.join(_o.path.dirname(_o.path.abspath(__file__)), "..", "scripts"))
+    from baseline import _search_suffixes
+    base = {"hosts": [{"ip": "10.0.0.5", "hostname": "PC1"}], "external": {"domains": [
+        {"query": f"{x}.dga.gq", "answered": False, "rcodes": ["SERVFAIL"], "srcs": ["10.0.0.5"]}
+        for x in ("wpad", "isatap", "aaa")]}}
+    assert _search_suffixes(base) == set()      # SERVFAIL 이면 마커 있어도 실격
+
+
 # ─────────────── P0: precision 헬퍼 + 코드-only floor ───────────────
 def test_score_precision_semantics():
     import sys as _s, os as _o

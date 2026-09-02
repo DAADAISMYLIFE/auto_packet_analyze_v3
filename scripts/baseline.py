@@ -108,6 +108,43 @@ def _parent(d):
     return ".".join(parts[-2:]) if len(parts) >= 2 else d.lower()
 
 
+def _search_suffixes(ev):
+    """LAN DHCP 검색 접미사 판정 (일반형 — 케이스 하드코딩 0):
+    부모 P 의 서브도메인 질의가 ≥3종, NXDOMAIN 이 하나 이상이고 non-NX 응답코드(SERVFAIL/NOERROR)가 없으며,
+    wpad/isatap/자기호스트명 마커가 반드시 있어야 접미사다 (overfit 감시관 지적: 마커 필수 —
+    다중 감염 호스트가 같은 죽은 C2 를 질의해도 접미사 면죄부가 안 나가게. 다중 출발호스트는 보강신호).
+    NXDOMAIN 전용인 이유: SERVFAIL(죽은 도메인·DGA)/timeout 을 '존재하지 않는 접미사'로 오판 금지.
+    근거(q2 실증): 진짜 터널은 권위서버가 응답해야 데이터가 흐른다. 오판 시 피해 '차단 안 함'이라 보수적."""
+    hostnames = {str(h.get("hostname") or "").lower() for h in ev.get("hosts", []) if h.get("hostname")}
+    groups = {}
+    for d in ev.get("external", {}).get("domains", []) or []:
+        q = str(d.get("query") or "").lower()
+        if "." not in q:
+            continue
+        p = _parent(q)
+        g = groups.setdefault(p, {"answered": False, "any_nx": False, "bad_rcode": False,
+                                  "srcs": set(), "subs": set()})
+        if d.get("answered"):
+            g["answered"] = True
+        rcodes = d.get("rcodes") or []
+        if "NXDOMAIN" in rcodes:
+            g["any_nx"] = True
+        if any(rc not in ("NXDOMAIN",) for rc in rcodes):   # SERVFAIL/NOERROR 등 = 죽은도메인/실존 → 실격
+            g["bad_rcode"] = True                            #   (빈 rcodes=미기록은 무해로 통과)
+        g["srcs"].update(d.get("srcs") or [])
+        sub = q[:-(len(p) + 1)] if q.endswith("." + p) else ""
+        if sub:
+            g["subs"].add(sub)
+    out = set()
+    for p, g in groups.items():
+        if g["answered"] or g["bad_rcode"] or not g["any_nx"] or len(g["subs"]) < 3:
+            continue
+        marker = any(sub in ("wpad", "isatap") or sub in hostnames for sub in g["subs"])
+        if marker:                               # 마커 필수 (다중 출발호스트만으론 불충분)
+            out.add(p)
+    return out
+
+
 def _dns_tunnel_parents(ev):
     """한 부모 밑 고엔트로피 서브도메인 여럿 = DNS 터널/exfil(예: *.pwned.se)."""
     he = (((ev.get("anomalies") or {}).get("dns") or {}).get("high_entropy")) or []
@@ -141,7 +178,8 @@ def profile_deviations(ev, top_k=25):
     beacon_ip = {str(b.get("dst")).lower() for b in (an.get("beacons") or []) if b.get("dst")}
     exfil_ratio = {str(x.get("dst")).lower(): x.get("ratio") or 0
                    for x in (an.get("exfil_candidates") or []) if x.get("dst")}
-    tunnels = _dns_tunnel_parents(ev)
+    suffixes = _search_suffixes(ev)              # 검색 접미사는 터널 후보에서 원천 제외
+    tunnels = {p: c for p, c in _dns_tunnel_parents(ev).items() if p not in suffixes}
 
     def ip_signals(ip):
         """IP 하나의 (hard, soft, reasons). alert=카테고리별, beacon/exfil=행동."""
@@ -209,6 +247,9 @@ def profile_deviations(ev, top_k=25):
         return bh, bs, bw
 
     for par, members in by_parent.items():
+        if par in suffixes:                      # 접미사 소속 질의는 전부 baseline (사건 후보 아님)
+            baseline.extend(members)
+            continue
         susp = [m for m in members if SUSP_TLD.search(m)]
         collapse = (par in tunnels) or (len(members) >= 3 and len(susp) >= 3)
         if collapse:                       # 터널/DGA 부모 1개로 접기(서브도메인 도배 방지)
@@ -274,6 +315,9 @@ def profile_deviations(ev, top_k=25):
                        "공격 판단 금지(DC 격리 자폭 방지).")}
 
     return {
+        "dns_search_suffix": {"list": sorted(suffixes),
+                              "note": "LAN DHCP 검색 접미사 (전-무응답 + 다중호스트/wpad 마커) — "
+                                      "터널·IOC 아님. Windows 가 실패 질의에 자동으로 붙이는 이름."},
         "top": devs[:top_k],
         "host_deviations": host_deviations,
         "baseline_suppressed": {"count": len(baseline), "sample": sorted(baseline)[:10]},

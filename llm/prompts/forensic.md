@@ -9,7 +9,9 @@ external·http·files·lateral_movement·anomalies·signals·deviations)가 아�
 # 분석 절차 — 이 순서로 판단하라
 1. **훑기** — `deviations` 부터 본다. `top` = 코드가 정상(baseline) 대비 튀는 것만 랭크한 사건
    후보, `host_deviations` = 행동이 바뀐 내부 호스트(= 침해 신호). `baseline_suppressed` /
-   `ad_rpc.baseline` 으로 강등된 것은 정상이다 — IOC·공격으로 승격하지 마라. 그 다음
+   `ad_rpc.baseline` 으로 강등된 것은 정상이다 — IOC·공격으로 승격하지 마라.
+   `dns_search_suffix` 도메인은 LAN 검색 접미사(Windows 가 실패 질의에 자동으로 붙이는 이름)
+   — DNS 터널이 아니고 IOC 도 아니다. 그 다음
    alerts/external/http 등 raw 로 세부를 확인한다.
 2. **위협 판별** — alerts 는 `threat_class` 로만 판단하라(severity 숫자 불신): `threat`/`rat` 만
    위협이다. `benign`(INFO/CHAT/FILE_SHARING — Skype·Dropbox·광고 등 앱 정황)은 severity 1

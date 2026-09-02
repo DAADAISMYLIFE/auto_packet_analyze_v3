@@ -844,7 +844,14 @@ def build_evidence(name, root="/home/qkekdhd/auto_packet_analyze_v3"):
         q = d.get("query"); ts = d.get("ts")
         if not q or q.endswith(".arpa") or q.endswith(".local"):
             continue
-        e = ext_dom.setdefault(q, {"query": q, "first_ts": None, "answers": None})
+        e = ext_dom.setdefault(q, {"query": q, "first_ts": None, "answers": None,
+                                    "srcs": set(), "answered": False, "rcodes": set()})
+        if d.get("id.orig_h"):
+            e["srcs"].add(d["id.orig_h"])
+        if d.get("rcode_name"):                  # NXDOMAIN(존재안함=접미사) vs SERVFAIL(죽은 도메인) 구분
+            e["rcodes"].add(d["rcode_name"])
+        if d.get("answers"):                     # 어느 레코드든 응답이 있었으면 True (접미사 판정 재료)
+            e["answered"] = True
         if ts and (e["first_ts"] is None or ts < e["first_ts"]):
             e["first_ts"] = ts
             e["answers"] = d.get("answers")
@@ -857,6 +864,9 @@ def build_evidence(name, root="/home/qkekdhd/auto_packet_analyze_v3"):
         e = ext_sni.setdefault(sni, {"sni": sni, "first_ts": None})
         if ts and (e["first_ts"] is None or ts < e["first_ts"]):
             e["first_ts"] = ts
+
+    for e in ext_dom.values():                   # set → JSON 직렬화 가능하게
+        e["srcs"] = sorted(e["srcs"]); e["rcodes"] = sorted(e["rcodes"])
 
     # ── anomalies 는 캡 '전'에 계산 — 비콘/유출/odd-port 목적지가 캡 우선순위의 재료 ──
     #   (무시그니처 행동 측정치. brute_force 를 같은 채널에 합류 → get_anomalies 로 자동 노출)

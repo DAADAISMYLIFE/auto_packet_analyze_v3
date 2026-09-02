@@ -245,6 +245,9 @@ class CaseContext:
             if ip in self.c2_flagged or _is_c2_attack(t):   # C2 오기(誤記) 보호: alert 기반 + technique 기반
                 continue
             self.attack_targets.add(ip)
+        # LAN DNS 검색 접미사 (baseline 일반형 판정) — 터널로 오인된 도메인의 IOC 승격 차단
+        dsx = (ev.get("deviations") or {}).get("dns_search_suffix") or {}
+        self.search_suffixes = {str(x).lower() for x in (dsx.get("list") or [])}
         # 그라운딩 기준집합 = evidence 의 '외부 관측' IP/도메인/해시 (내부 자산 원천 제외)
         self.observed = tools.observed_iocs()
 
@@ -408,6 +411,10 @@ def ground_iocs(analysis, ctx):
             seen.add(host)
             rejected.append({"kind": "domain", "value": d,
                              "reason": "내부 자산 (IOC 아님)"})
+        elif any(host == sfx or host.endswith("." + sfx) for sfx in ctx.search_suffixes):
+            seen.add(host)                       # LAN 검색 접미사 — 존재하지 않는 이름, 차단 무의미
+            rejected.append({"kind": "domain", "value": d,
+                             "reason": "LAN DNS 검색 접미사 (터널 아님 — IOC 아님)"})
         elif dom_ok(host):
             seen.add(host)
             kept_doms.append(host)
@@ -604,7 +611,7 @@ def apply_guards(analysis, tools):
     return analysis
 
 
-def code_triage(tools):
+def code_triage(tools, verbose=True):
     """코드가 답을 아는 triage — threat/rat alert 나 멀웨어 후보 해시가 있으면 '사건 아님'일 수는
     없다(결정론적 사실). 3지선다에 LLM 사고 토큰(호출당 수 분)을 태우지 않고 생략한다.
     verdict 는 suspicious 바닥 — 확정 승급은 forensic+가드 뒤 upgrade_verdict(역시 코드)가 한다.
@@ -618,7 +625,8 @@ def code_triage(tools):
         reasons.append(f"멀웨어 후보 해시 {len(mal)}개 (업데이트 인프라 서빙분 제외 후)")
     if not reasons:
         return None
-    print(f"[triage] 코드 판정 — LLM triage 생략: {reasons[0]}")
+    if verbose:
+        print(f"[triage] 코드 판정 — LLM triage 생략: {reasons[0]}")
     return {"verdict": "suspicious",
             "grounds": ["[코드 판정 — LLM triage 생략] " + r for r in reasons]}
 
@@ -638,7 +646,7 @@ def upgrade_verdict(out, analysis):
                               f"— suspicious → confirmed")
 
 
-def floor_report(tools):
+def floor_report(tools, verbose=True):
     """코드-only 바닥 보고서 (LLM 0회) — 판결문 P0-2 의 상설 베이스라인.
     이후 모든 성능 표는 [코드-only / +LLM] 비교 형식으로만 인용한다.
     - verdict: code_triage 신호 있으면 suspicious(가드 뒤 upgrade 가능), 없으면 no_incident.
@@ -646,7 +654,7 @@ def floor_report(tools):
       (host_deviations 를 판정으로 승격하는 과잉은 레드팀 심사에서 기각된 codex 안).
     - iocs 는 승격기(알럿/의심TLD/인바운드)가 채우고 가드가 정제 — 즉 floor 의 IOC 성적이
       곧 "LLM 없이 어디까지"이며, LLM 행과의 차이가 곧 LLM 의 순기여(발견 장부의 분모)다."""
-    res = code_triage(tools)
+    res = code_triage(tools, verbose=verbose)
     if res is None:
         return {"verdict": "no_incident",
                 "grounds": ["[코드 바닥] 위협 카테고리 alert·멀웨어 후보 해시 없음"],
@@ -736,6 +744,24 @@ def main():
         if analysis:
             apply_guards(analysis, tools)
             upgrade_verdict(out, analysis)   # 결정론 승급 (suspicious 바닥 → confirmed)
+            # ── LLM델타 발견 장부 (삼자회의 합의 + overfit감시관 보강: verdict 필드 필수,
+            #    floor 는 동일 함수 경로 강제 — 델타가 '두 구현 드리프트'가 아니라 'LLM 기여'를 재게).
+            ffull = floor_report(tools, verbose=False)         # main 의 floor 모드와 같은 함수
+            fout, fanalysis = ffull
+            fi = (fanalysis or {}).get("iocs", {})
+            li = analysis.get("iocs", {})
+            fset = set(fi.get("c2", []) + fi.get("delivery", []) + fi.get("exfil", []))
+            lset = set(li.get("c2", []) + li.get("delivery", []) + li.get("exfil", []))
+            out["_llm_delta"] = {
+                "verdict_floor": fout.get("verdict"), "verdict_full": out["verdict"],
+                "iocs_added": sorted(lset - fset), "iocs_lost": sorted(fset - lset),
+                "domains_added": sorted(set(li.get("domains", [])) - set(fi.get("domains", []))),
+                "victims_added": sorted(v.get("ip") or "" for v in analysis.get("victims", [])
+                                        if v.get("status") == "compromised"),
+            }
+            print(f"[llm-delta] verdict {fout.get('verdict')}→{out['verdict']}  "
+                  f"+IOC {out['_llm_delta']['iocs_added']}  "
+                  f"+피해자 {out['_llm_delta']['victims_added']}")
             out["analysis"] = analysis
             print(json.dumps(analysis, ensure_ascii=False, indent=2))
         else:
