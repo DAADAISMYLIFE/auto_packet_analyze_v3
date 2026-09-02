@@ -190,7 +190,7 @@ zeek는 네이티브가 없으면 **docker `zeek/zeek:latest`** 로 폴백. 출�
 ---
 
 ## `llm/config.py` — 설정 단일 소스
-리포 루트 `.env` 를 읽어 노출: `MODEL`, `NUM_CTX`, `THINK`(추론 모드 on/off), `OPTS`(temperature/top_p/seed/num_ctx), `VERDICT_SCHEMA`,
+리포 루트 `.env` 를 읽어 노출: `MODEL`, `NUM_CTX`, `THINK`(false/true/low/medium/high — 추론 강도), `OPTS`(temperature/top_p/top_k/seed/num_ctx/num_predict/num_batch), `VERDICT_SCHEMA`,
 `REPORT_SCHEMA`(둘 다 ollama `format` 강제용), `SYSTEM_PROMPT_TRIAGE/FORENSIC`(=`prompts/*.md`).
 **프롬프트는 코드 아니라 `.md` 파일**, **설정은 `.env` 한 줄** — 코드 안 건드리고 튜닝.
 
@@ -228,9 +228,13 @@ llama.cpp 그래머라 대부분 모델 가능.
 - 안 뜨면(OOM) `.env` `NUM_CTX` 낮추기.
 
 **qwen3.8:27b (현재, `-mtp-q4_K_M` 태그)**: 동급 오픈웨이트 1위(AA Index 52)인데 **추론(thinking) 켠 점수**다.
-- `.env THINK=true` 가 기본. 끄면 광고를 IOC 로, Shellshock 서사 증발 같은 판단 실패(q2 실측). ollama 는 모델
-  템플릿을 제네릭으로 갈아끼워 `reasoning_effort`(low/medium)를 못 넘기므로 선택지는 켬(xhigh)/끔 뿐 —
-  medium 이 필요하면 llama-server `--jinja` 이식이 필요(파이프라인 근간 변경, 마지막 수단).
+- `.env THINK` 로 추론 강도 조절 — **ollama 가 qwen3.8 전용 렌더러(`model/renderers/qwen35.go`)로 레벨을
+  지원한다** (`think="low"/"medium"/"high"` 문자열). reasoning_effort 의 정체는 토큰 예산이 아니라 템플릿에
+  끼워넣는 지침 문장: xhigh="철저히 더블체크"(최대 사고), **medium=지침 없음**(본연 판단), low="빨리 결론".
+  실측(커뮤니티 벤치): 복잡 과제에서 medium 은 토큰 40~60% 절감·완성도 소폭↓, low 는 토큰 폭증+자가검증
+  루프라 포렌식 금지. `THINK=true`(bool)는 xhigh 로 매핑 — 그동안 최대 과잉사고로 돌았던 원인.
+  현재 기본 `THINK=medium`, 직전 xhigh 결과(forensic_raw 캐시)와 truth 로 A/B 중.
+  끄면(`false`) 판단력 급감(광고를 IOC 로, q2 실측) — 금지.
 - ollama 버그 이력: think=false 면 `format` 스키마가 조용히 무시됨(#14645/#15260). 노트북 진단 셀이 매 세션
   `format 강제 OK` 를 확인한다.
 - 샘플링은 모델카드 권장(thinking 1.0/0.95). MTP 는 무손실(메인 모델 검증)이라 품질 요인 아님.

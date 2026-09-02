@@ -304,6 +304,50 @@ def test_upgrade_verdict_deterministic():
     assert out2["verdict"] == "suspicious"          # 침해 확정 호스트 없으면 승급 안 함
 
 
+# ─────────────── C2 technique 게이트 (시그니처 침묵 C2) + THINK 파서 ───────────────
+def test_signatureless_c2_target_survives_via_technique():
+    """alert 0건(시그니처 침묵)인 C2 를 LLM 이 technique=c2_beacon 으로 적었을 때 —
+    표적 제거가 못 지우고 iocs.c2 에 남는다 (q2 실측: 136.243.24.249, 46.108.156.146 회귀)."""
+    e = ev(hosts=[WS], ext_ips=["7.7.7.7"])                # alert 없음!
+    a = {"victims": [], "attacks": [{"technique": "c2_beacon", "actor": "10.0.0.5",
+                                     "target": "7.7.7.7"}],
+         "iocs": {"c2": ["7.7.7.7"], "delivery": [], "exfil": [], "domains": [], "hashes": []}}
+    run.apply_guards(a, FakeTools(e))
+    assert "7.7.7.7" in a["iocs"]["c2"], a
+    assert "7.7.7.7" in a.get("_c2_kept_despite_target_label", [])
+
+
+def test_c2_domain_target_host_survives_via_technique():
+    """C2 체크인 attack 의 target_host 도메인(hadevatjulps.com 실증)은 표적 도메인 제거에서 보호."""
+    e = ev(hosts=[WS], domains=[("hadevatjulps.com", ["7.7.7.7"])], ext_ips=["7.7.7.7"])
+    a = {"victims": [], "attacks": [{"technique": "c2_tordal_checkin", "actor": "10.0.0.5",
+                                     "target": "7.7.7.7", "target_host": "hadevatjulps.com"}],
+         "iocs": {"c2": [], "delivery": [], "exfil": [], "domains": ["hadevatjulps.com"], "hashes": []}}
+    run.apply_guards(a, FakeTools(e))
+    assert a["iocs"]["domains"] == ["hadevatjulps.com"], a
+
+
+def test_non_c2_technique_target_still_removed():
+    """technique 가 exploit 류면 target 은 진짜 피격자 — 기존 자폭 방지 그대로."""
+    e = ev(hosts=[WS], ext_ips=["8.8.4.4"])
+    a = {"victims": [], "attacks": [{"technique": "exploit_sqli", "actor": "10.0.0.5",
+                                     "target": "8.8.4.4"}],
+         "iocs": {"c2": ["8.8.4.4"], "delivery": [], "exfil": [], "domains": [], "hashes": []}}
+    run.apply_guards(a, FakeTools(e))
+    assert a["iocs"]["c2"] == [], a
+
+
+def test_think_parser_levels():
+    import config
+    p = config._parse_think
+    assert p("true", "x") is True and p("false", "x") is False
+    assert p("medium", "x") == "medium" and p("HIGH", "x") == "high" and p(None, "low") == "low"
+    try:
+        p("xhigh2", "x"); assert False, "잘못된 값은 거부"
+    except SystemExit:
+        pass
+
+
 # ─────────────── forensic 캐시/replay (개발 루프 가속기) ───────────────
 def test_forensic_cache_roundtrip(tmpbase="/tmp/claude-1000/-home-qkekdhd-slm-auto-packet-analyze-v3/f6467c84-eeb5-4912-9291-e32ee6c1bdd7/scratchpad/fc_case"):
     import os, json as _j

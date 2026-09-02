@@ -22,6 +22,16 @@ SUSP_TLD = re.compile(r"\.(su|cc|cyou|xyz|top|tk|gq|ml|cf|ga)$")
 # 위협 alert 판정은 tools.is_threat_alert 가 단일 구현 (evidence.threat_class 우선, 구 evidence 정규식 폴백).
 _is_threat_alert = is_threat_alert
 
+# LLM 이 attacks[].technique 에 적는 C2/유출 계열 라벨 — 이런 attack 의 target/target_host 는
+# '피격자'가 아니라 '악성 인프라'다(내부→외부 통신 기록). 시그니처가 침묵하는 C2 는 c2_flagged
+# (알럿 기반)가 못 받쳐주므로 이게 두 번째 보호막이다 (q2 실측: 136.243.24.249·46.108.156.146 이
+# alert 0건이라 표적으로 오인 삭제됨 / 2021-06-16 hadevatjulps.com 도메인 동일).
+_C2_TECHNIQUE = re.compile(r"c2|cnc|command.?and.?control|beacon|checkin|exfil|tunnel", re.I)
+
+
+def _is_c2_attack(a):
+    return bool(_C2_TECHNIQUE.search(str(a.get("technique") or "")))
+
 
 # 컨텍스트 예산 — NUM_CTX 의 일부만 입력에 쓴다(사고 토큰 + 출력 여유). triage 는 3지선다라 더 짧게.
 #   예산 안에 들어가면 뷰 level 0 (= 오늘과 동일). 넘칠 때만 '신호 없는 행'부터 단계적으로 줄인다.
@@ -238,8 +248,12 @@ class CaseContext:
         self.attack_targets = set()
         for t in (analysis.get("attacks") or []):
             m = _IPV4.search(str(t.get("target") or ""))
-            if m and m.group(0).lower() not in self.c2_flagged:   # C2 오기(誤記) 보호
-                self.attack_targets.add(m.group(0).lower())
+            if not m:
+                continue
+            ip = m.group(0).lower()
+            if ip in self.c2_flagged or _is_c2_attack(t):   # C2 오기(誤記) 보호: alert 기반 + technique 기반
+                continue
+            self.attack_targets.add(ip)
         # 그라운딩 기준집합 = evidence 의 '외부 관측' IP/도메인/해시 (내부 자산 원천 제외)
         self.observed = tools.observed_iocs()
 
@@ -439,23 +453,24 @@ def annotate_attacks(analysis, ctx):
     for a in attacks:
         a["actor_scope"] = scope(a.get("actor"))       # 코드가 확정 (LLM 값 덮어씀)
         a["target_scope"] = scope(a.get("target"))
+        c2ish = _is_c2_attack(a)                       # C2/유출 통신 기록 — target 은 악성 인프라
         if a.get("target"):
             t = str(a["target"]).lower()
-            if t in ctx.c2_flagged:                    # 멀웨어-통신 alert 가 가리키는 IP = C2 (표적 오기 보호)
+            if t in ctx.c2_flagged or c2ish:           # 표적 오기 보호: alert 기반 + technique 기반
                 c2_protected.add(t)
             else:
                 targets.add(t)
         # 표적 도메인은 attack 레코드가 이미 안다 → target_host + sample_uri 의 host
         th = str(a.get("target_host") or "").lower()
         if th and th != "unknown":
-            thosts.add(th)
+            (c2_protected if c2ish else thosts).add(th)   # C2 도메인(hadevatjulps.com) 보호
         # sample_uri 의 host 정체는 방향에 달렸다:
-        #   actor 내부(밖을 공격) → host = 외부 피격자 → 표적이므로 제거
+        #   actor 내부(밖을 공격) → host = 외부 피격자 → 표적이므로 제거 (단, c2 통신이면 C2 도메인)
         #   actor 외부(안을 공격) → host = 페이로드 배포 서버 → delivery IOC 이므로 보존
         host = str(a.get("sample_uri") or "").split("/", 1)[0].lower()
         if host and "." in host and not host.replace(".", "").replace(":", "").isdigit():
             if a["actor_scope"] == "internal":
-                thosts.add(host)
+                (c2_protected if c2ish else thosts).add(host)
 
     iocs = analysis.get("iocs", {})
     removed = []

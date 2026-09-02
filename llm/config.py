@@ -36,17 +36,38 @@ NUM_CTX = int(os.environ.get("NUM_CTX", "65536"))   # evidence 안 잘리게 크
 TEMPERATURE = float(os.environ.get("TEMPERATURE", "0.3"))
 TOP_P = float(os.environ.get("TOP_P", "0.95"))
 SEED = int(os.environ.get("SEED", "42"))
-# 추론(thinking) 모드. qwen3.8 같은 reasoning 모델은 추론이 본체라 끄면 판단력이 급감한다.
-#   ollama 는 모델 템플릿을 제네릭으로 갈아끼워 reasoning_effort(low/medium)를 못 넘기므로
-#   선택지는 켬(xhigh) / 끔 뿐. 배치 포렌식은 켠 채로 시간을 재는 게 기본.
-#   주의: ollama 는 think=false 일 때 format(스키마 강제)을 조용히 무시하는 버그 이력이 있다
-#   (ollama #14645/#15260) — 끌 때는 노트북의 format 강제 진단을 반드시 확인.
-THINK = os.environ.get("THINK", "true").strip().lower() in ("1", "true", "yes", "on")
-# 서술(render_report) 전용 — 3문장 요약엔 xhigh 사고가 낭비(호출당 수 분).
-THINK_NARRATIVE = os.environ.get("THINK_NARRATIVE", "false").strip().lower() in ("1", "true", "yes", "on")
+# ── 추론(thinking) 강도 ──
+# ollama 는 qwen3.8 전용 네이티브 렌더러(model/renderers/qwen35.go)로 추론 강도를 지원한다.
+# reasoning_effort 의 정체는 토큰 예산이 아니라 '템플릿에 끼워넣는 지침 문장'이다:
+#   true/high/max → xhigh 지침("철저히 검토·더블체크") 주입 = 최대 사고 (기본값이 이거라 과잉사고)
+#   medium       → 지침 없음(모델 본연 판단). 복잡 과제 실측: 토큰 40~60% 절감, 완성도 소폭 하락
+#   low          → "빨리 결론" 지침. 복잡 과제에서 오히려 토큰 폭증+자가검증 루프 실측 — 포렌식 금지
+#   false        → 사고 자체를 끔. reasoning 모델의 판단력이 급감(q2 실측: 광고를 IOC 로) — 금지
+# 주의: ollama 는 think=false 일 때 format(스키마 강제)을 조용히 무시한 버그 이력(#14645/#15260).
+def _parse_think(value, default):
+    v = str(value if value is not None else default).strip().lower()
+    if v in ("1", "true", "yes", "on"):
+        return True
+    if v in ("0", "false", "no", "off"):
+        return False
+    if v in ("low", "medium", "high", "max"):
+        return v
+    raise SystemExit(f"THINK={value!r} 인식 불가 — true/false/low/medium/high/max 중 하나")
+
+
+THINK = _parse_think(os.environ.get("THINK"), "medium")
+# 서술(render_report) 전용 — 3문장 요약엔 사고가 낭비(호출당 수 분). 파싱 실패 시 render 가 자동 재시도.
+THINK_NARRATIVE = _parse_think(os.environ.get("THINK_NARRATIVE"), "false")
+
+TOP_K = int(os.environ.get("TOP_K", "20"))            # qwen3.8 모델카드 권장 20 (ollama 기본 40)
+# 폭주 차단기 — 사고+출력 합계 상한. 실측 정상 케이스가 사고≈7k+출력≈4k 이므로 넉넉히 잡는다.
+#   너무 낮으면 사고가 예산을 다 먹고 본답이 안 나온다(ollama #14793 — 빈 응답/루프).
+NUM_PREDICT = int(os.environ.get("NUM_PREDICT", "16000"))
+NUM_BATCH = int(os.environ.get("NUM_BATCH", "1024"))  # prefill 배치 512→1024 (T4 VRAM 여유 실측 후)
 
 # ollama chat 에 그대로 넘기는 옵션
-OPTS = {"temperature": TEMPERATURE, "top_p": TOP_P, "seed": SEED, "num_ctx": NUM_CTX}
+OPTS = {"temperature": TEMPERATURE, "top_p": TOP_P, "top_k": TOP_K, "seed": SEED,
+        "num_ctx": NUM_CTX, "num_predict": NUM_PREDICT, "num_batch": NUM_BATCH}
 
 # ── 시스템 프롬프트 (파일에서 로드) ──
 SYSTEM_PROMPT_TRIAGE = (_PROMPTS / "triage.md").read_text(encoding="utf-8")
