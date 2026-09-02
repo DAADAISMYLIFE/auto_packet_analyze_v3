@@ -1,6 +1,6 @@
 {
   "case": "q2",
-  "source": "자체 포렌식 라벨링 v2 — 2026-09-02 패킷 레벨 재분석으로 v1 정정 (근거 전문: q2.notes.md). 세 갈래: (1) 웹서버 192.168.0.2 가 7개 출처의 웹공격(Shellshock 쿠키 802·curl/wget 주입·ZyXEL·Masscan)을 받았으나 응답 404/403 뿐 + 페이로드 서버 6곳(54.248.244.82 등) 접촉 0건 = 전건 시도 실패. (2) 192.168.0.53(password-ned-xp) 클릭사기 감염 — 죽은 주 C2 비콘(94.242.254.208:80, 13초 간격 773회 전부 S0 무응답 24h) + 살아있는 클릭사기 체인(0a0a.eu 랜딩→searchl.org 가짜검색[DNS 무질의, Host 헤더 직결]→88.214.241.199/click 과금→광고망) + 죽은 DGA(워드샐러드 .org 6종 전부 SERVFAIL) + 사기 TDS 홉(.gq→46.108.156.146). (3) 192.168.0.54 는 Wajam 애드웨어(PUP, technologieduluth.com /webenhancer — v1 이 .53 으로 오귀속했던 것). 정정: pwned.se 는 DNS 터널이 아니라 LAN DHCP 검색 접미사다 — 1,045건 전부 NXDOMAIN(내부 GW 응답), 비감염 호스트(.51/.54)도 질의, 내용은 wpad/isatap/자기호스트명 + .53 멀웨어의 실패 질의에 접미사 자동부착. 채널이 기능한 적 없음 → IOC 에서 제외.",
+  "source": "자체 포렌식 라벨링 v2.1 (victims=침해 확정만, 공격 표적은 targets 필드) — 2026-09-02 패킷 레벨 재분석으로 v1 정정 (근거 전문: q2.notes.md). 세 갈래: (1) 웹서버 192.168.0.2 가 7개 출처의 웹공격(Shellshock 쿠키 802·curl/wget 주입·ZyXEL·Masscan)을 받았으나 응답 404/403 뿐 + 페이로드 서버 6곳(54.248.244.82 등) 접촉 0건 = 전건 시도 실패. (2) 192.168.0.53(password-ned-xp) 클릭사기 감염 — 죽은 주 C2 비콘(94.242.254.208:80, 13초 간격 773회 전부 S0 무응답 24h) + 살아있는 클릭사기 체인(0a0a.eu 랜딩→searchl.org 가짜검색[DNS 무질의, Host 헤더 직결]→88.214.241.199/click 과금→광고망) + 죽은 DGA(워드샐러드 .org 6종 전부 SERVFAIL) + 사기 TDS 홉(.gq→46.108.156.146). (3) 192.168.0.54 는 Wajam 애드웨어(PUP, technologieduluth.com /webenhancer — v1 이 .53 으로 오귀속했던 것). 정정: pwned.se 는 DNS 터널이 아니라 LAN DHCP 검색 접미사다 — 1,045건 전부 NXDOMAIN(내부 GW 응답), 비감염 호스트(.51/.54)도 질의, 내용은 wpad/isatap/자기호스트명 + .53 멀웨어의 실패 질의에 접미사 자동부착. 채널이 기능한 적 없음 → IOC 에서 제외.",
   "verdict": "confirmed",
   "victims": [
     {
@@ -10,14 +10,6 @@
       "malware": [
         "Poweliks/clickfraud (searchl.org→88.214 체인)",
         "죽은 C2 비콘(94.242.254.208)"
-      ]
-    },
-    {
-      "ip": "192.168.0.2",
-      "hostname": null,
-      "username": null,
-      "malware": [
-        "웹공격 표적 (Shellshock 등 7출처 — 전건 시도 실패)"
       ]
     },
     {
@@ -63,5 +55,11 @@
     "6a34b09daeb0eba260faaf911a27e4e0af44313e98931f4a30bf940e5515aaa8"
   ],
   "benign_hashes_note": "카빙 바이너리 직접 검증: a8ab…=VeriSign Class3 코드서명 'Nvidia Corporation' 정품 드라이버(8.36.120.225 NVIDIA CDN, .54 수신) / 6a34…=AOL CDN(o.aolcdn.com) 광고테크 SWF 'MessageSenderV2'(XMLSocket 위젯). 파이프라인이 이 둘을 iocs.hashes 로 승격하면 오탐.",
-  "patient_zero": ""
+  "patient_zero": "",
+  "targets": [
+    {
+      "ip": "192.168.0.2",
+      "note": "웹공격 표적 (7출처, 전건 시도 실패 — compromised 아님. 채점기 victims 는 침해만 세므로 별도 필드)"
+    }
+  ]
 }

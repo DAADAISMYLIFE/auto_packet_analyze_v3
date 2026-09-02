@@ -74,6 +74,22 @@ def evidence_iocs(case, output_dir):
         for k in ("sha256", "md5"):
             if frec.get(k):
                 hashes.add(str(frec[k]).lower())
+    # 위협 alert 의 외부 IP — 인바운드 공격자는 external.ips(아웃바운드 dst 집계)에 없고
+    #   alert src 로만 존재한다. run.py 승격기가 이 근거로 넣은 IP 를 grounding 이
+    #   '환각'으로 오판하던 버그(q2 실측: 146.52.78.242 등 5개) 수정.
+    internal = {str(h.get("ip")).lower() for h in ev.get("hosts", []) if h.get("ip")}
+    for a in ev.get("alerts", []) or []:
+        if (a.get("threat_class") or "") in ("threat", "rat"):
+            for ip in (a.get("src_ips") or []) + (a.get("dst_ips") or []):
+                v = str(ip).lower()
+                if v and v not in internal and IP_RE.fullmatch(v):
+                    ips.add(v)
+    # http Host 헤더 도메인 — DNS 무질의 직결 C2/TDS (tools.observed_iocs 와 동일 근거,
+    #   q2 실측: searchl.org / 0a0a.eu 를 환각도메인으로 오판하던 버그)
+    for h in (ext.get("http") or []):
+        host = str(h.get("url") or "").split("/", 1)[0].lower().split(":", 1)[0]
+        if host and "." in host and not IP_RE.fullmatch(host):
+            doms.add(host)
     return {"ips": ips, "domains": doms, "hashes": hashes}
 
 
