@@ -638,19 +638,59 @@ def upgrade_verdict(out, analysis):
                               f"— suspicious → confirmed")
 
 
+def floor_report(tools):
+    """코드-only 바닥 보고서 (LLM 0회) — 판결문 P0-2 의 상설 베이스라인.
+    이후 모든 성능 표는 [코드-only / +LLM] 비교 형식으로만 인용한다.
+    - verdict: code_triage 신호 있으면 suspicious(가드 뒤 upgrade 가능), 없으면 no_incident.
+    - victims 는 채우지 않는다 — 침해 '판정'은 코드 소관이 아니라는 원칙 유지
+      (host_deviations 를 판정으로 승격하는 과잉은 레드팀 심사에서 기각된 codex 안).
+    - iocs 는 승격기(알럿/의심TLD/인바운드)가 채우고 가드가 정제 — 즉 floor 의 IOC 성적이
+      곧 "LLM 없이 어디까지"이며, LLM 행과의 차이가 곧 LLM 의 순기여(발견 장부의 분모)다."""
+    res = code_triage(tools)
+    if res is None:
+        return {"verdict": "no_incident",
+                "grounds": ["[코드 바닥] 위협 카테고리 alert·멀웨어 후보 해시 없음"],
+                "pipeline_status": "ok", "_mode": "floor"}, None
+    analysis = {"victims": [], "attacks": [],
+                "iocs": {"c2": [], "delivery": [], "exfil": [], "domains": [], "hashes": []},
+                "timeline": [], "patient_zero": "",
+                "executive_summary": "(코드-only 바닥 — LLM 분석 없음)",
+                "anomaly_analysis": [], "assessment": "코드 결정론 신호만 반영된 바닥 보고서."}
+    apply_guards(analysis, tools)
+    out = {"verdict": res["verdict"], "grounds": res.get("grounds", []),
+           "pipeline_status": "ok", "_mode": "floor", "analysis": analysis}
+    upgrade_verdict(out, analysis)
+    return out, analysis
+
+
 def main():
     # 1. 인자: <case> [--fresh|--replay]
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     flags = {a for a in sys.argv[1:] if a.startswith("--")}
     if not args:
-        raise SystemExit("사용법: python3 run.py <case> [--fresh|--replay]\n"
+        raise SystemExit("사용법: python3 run.py <case> [--floor|--fresh|--replay]\n"
+                         "  --floor: 코드-only 바닥 (LLM 0회, 수 초) → reports/floor/<case>.json\n"
                          "  (기본 auto: evidence 동일하면 forensic 캐시 재생 — 코드 수정 반복 가속)\n"
                          "  --fresh: 항상 LLM 재호출  |  --replay: LLM 절대 호출 안 함(캐시만, 로컬 가능)")
     filename = args[0]
-    fmode = "replay" if "--replay" in flags else ("fresh" if "--fresh" in flags else "auto")
+    fmode = ("floor" if "--floor" in flags else
+             "replay" if "--replay" in flags else ("fresh" if "--fresh" in flags else "auto"))
 
     # 2. TOOLS 클래스 생성
     tools = Tools(filename)
+
+    # 코드-only 바닥 (LLM 0회, 수 초) — reports/floor/ 에 별도 저장해 LLM 행과 나란히 채점
+    if fmode == "floor":
+        out, _ = floor_report(tools)
+        ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        fdir = os.path.join(ROOT, "reports", "floor")
+        os.makedirs(fdir, exist_ok=True)
+        path = os.path.join(fdir, f"{filename}.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(out, f, ensure_ascii=False, indent=2)
+        print(f"[floor] verdict={out['verdict']}  c2={len((out.get('analysis') or {}).get('iocs', {}).get('c2', []))}건")
+        print(f"[report] 코드-only 바닥 → {path}")
+        return
 
     # 3. triage → (에스컬레이션 시) forensic. 모든 결과를 하나의 JSON 으로.
     ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

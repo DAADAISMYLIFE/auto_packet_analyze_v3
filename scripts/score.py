@@ -129,6 +129,26 @@ def _domain_recall(found, truth):
     return hit / len(truth)
 
 
+def _precision(found, truth):
+    """보고한 것 중 truth 에 있는 비율. found 비면 None (보고 안 함 ≠ 정확).
+    truth 가 비었는데 보고했으면 0.0 — '없는 걸 만들어냄'은 최악의 precision."""
+    found = set(found)
+    if not found:
+        return None
+    truth = norm_set(truth)
+    return len([f for f in found if f in truth]) / len(found)
+
+
+def _domain_precision(found, truth):
+    found = set(found)
+    if not found:
+        return None
+    truth = norm_set(truth)
+    hit = sum(1 for d in found
+              if any(d == t or d.endswith("." + t) or t.endswith("." + d) for t in truth))
+    return hit / len(found)
+
+
 def _ungrounded_domains(found, ev):
     return [d for d in found
             if not any(d == e or d.endswith("." + e) or e.endswith("." + d) for e in ev)]
@@ -144,10 +164,27 @@ def score(atoms, truth, ev):
     r["infra_bad"] = sorted(ip for ip, st in atoms["victim_status"].items()
                             if ip in infra and st == "compromised")
 
+    # victim precision: compromised 라고 부른 것 중 truth 피해자 비율 (초과 = 격리 오폭 후보)
+    truth_victims = norm_set(v["ip"] for v in truth.get("victims", []))
+    r["victimP"] = _precision(atoms["victims"], truth_victims)
+    r["over_victims"] = sorted(atoms["victims"] - truth_victims)
+
     ti = truth.get("iocs", {})
-    r["iocR"] = _recall(atoms["ioc_ips"], ti.get("c2", []) + ti.get("delivery", []) + ti.get("exfil", []))
+    truth_ips = norm_set(ti.get("c2", []) + ti.get("delivery", []) + ti.get("exfil", []))
+    truth_doms = norm_set(ti.get("domains", []))
+    r["iocR"] = _recall(atoms["ioc_ips"], truth_ips)
     r["domR"] = _domain_recall(atoms["domains"], ti.get("domains", []))
     r["hashR"] = _recall(atoms["hashes"], ti.get("hashes", []))
+    # ── precision (판결문 P0-1): drop 룰을 뽑는 시스템의 1급 지표 — '뭘 잘못 올렸나' ──
+    #   주의: truth IOC 목록의 완전성에 의존한다(공식답안 케이스는 준수, 자체라벨은 근사).
+    #   초과분은 '환각'이 아니라 'truth 밖'(진짜 신규 발견일 수도) — 목록을 보고 사람이 판단.
+    r["iocP"] = _precision(atoms["ioc_ips"], truth_ips)
+    r["domP"] = _domain_precision(atoms["domains"], truth_doms)
+    r["hashP"] = _precision(atoms["hashes"], norm_set(ti.get("hashes", [])))
+    r["over_ips"] = sorted(ip for ip in atoms["ioc_ips"] if ip not in truth_ips)
+    r["over_doms"] = sorted(d for d in atoms["domains"]
+                            if not any(d == t or d.endswith("." + t) or t.endswith("." + d)
+                                       for t in truth_doms))
 
     if ev is not None:
         r["ground_bad_ips"] = sorted(ip for ip in atoms["ioc_ips"] if ip not in ev["ips"])
@@ -189,7 +226,8 @@ def _f(x):
 
 def print_rows(rows, label):
     print(f"\n=== {label} ===")
-    hdr = f"{'case':<10} {'verdict':<14} {'grd':<4} {'vR':<5} {'infra!':<7} {'hashR':<6} {'fp':<4} {'iocR':<5} {'domR':<5} {'pz':<3}"
+    hdr = (f"{'case':<10} {'verdict':<14} {'grd':<4} {'vR':<5} {'vP':<5} {'infra!':<7} "
+           f"{'iocR':<5} {'iocP':<5} {'domR':<5} {'domP':<5} {'hashR':<6} {'fp':<4} {'pz':<3}")
     print(hdr); print("-" * len(hdr))
     agg = {}
     for case, r in rows:
@@ -201,8 +239,9 @@ def print_rows(rows, label):
         fp = "ok" if not r["fp"] else f"FP{len(r['fp'])}"
         pz = "-" if r["pz_ok"] is None else ("OK" if r["pz_ok"] else "XX")
         print(f"{case:<10} {(str(r['verdict'])+'/'+vok):<14} {grd:<4} {_f(r['victimR']):<5} "
-              f"{infra:<7} {_f(r['hashR']):<6} {fp:<4} {_f(r['iocR']):<5} {_f(r['domR']):<5} {pz:<3}")
-        for k in ("victimR", "iocR", "domR", "hashR"):
+              f"{_f(r['victimP']):<5} {infra:<7} {_f(r['iocR']):<5} {_f(r['iocP']):<5} "
+              f"{_f(r['domR']):<5} {_f(r['domP']):<5} {_f(r['hashR']):<6} {fp:<4} {pz:<3}")
+        for k in ("victimR", "victimP", "iocR", "iocP", "domR", "domP", "hashR"):
             if r[k] is not None:
                 agg.setdefault(k, []).append(r[k])
         agg.setdefault("verdict", []).append(1 if r["verdict_ok"] else 0)
@@ -213,13 +252,18 @@ def print_rows(rows, label):
     if agg:
         m = lambda k: sum(agg[k]) / len(agg[k]) if agg.get(k) else float("nan")
         print("-" * len(hdr))
-        print(f"{'AGG':<10} verdict={m('verdict'):.2f}  victimR={m('victimR'):.2f}  iocR={m('iocR'):.2f}  "
-              f"domR={m('domR'):.2f}  hashR={m('hashR'):.2f}  "
+        print(f"{'AGG':<10} verdict={m('verdict'):.2f}  victim R/P={m('victimR'):.2f}/{m('victimP'):.2f}  "
+              f"ioc R/P={m('iocR'):.2f}/{m('iocP'):.2f}  dom R/P={m('domR'):.2f}/{m('domP'):.2f}  "
+              f"hashR={m('hashR'):.2f}  "
               f"infra_fail={sum(agg.get('infra_fail', []))}  ground_fail={sum(agg.get('ground_fail', []))}  "
               f"fp_total={sum(agg.get('fp_total', []))}")
     for case, r in rows:
-        if r and (r["ground_bad_ips"] or r["ground_bad_hash"] or r["ground_bad_dom"] or r["infra_bad"] or r["fp"]):
+        if r and (r["ground_bad_ips"] or r["ground_bad_hash"] or r["ground_bad_dom"] or r["infra_bad"]
+                  or r["fp"] or r.get("over_ips") or r.get("over_doms") or r.get("over_victims")):
             det = []
+            if r.get("over_victims"): det.append(f"초과피해자={r['over_victims']}")
+            if r.get("over_ips"):     det.append(f"truth밖IP={r['over_ips'][:8]}")
+            if r.get("over_doms"):    det.append(f"truth밖도메인={r['over_doms'][:8]}")
             if r["ground_bad_ips"]:  det.append(f"환각IP={r['ground_bad_ips']}")
             if r["ground_bad_hash"]: det.append(f"환각HASH={len(r['ground_bad_hash'])}")
             if r["ground_bad_dom"]:  det.append(f"환각도메인={r['ground_bad_dom']}")

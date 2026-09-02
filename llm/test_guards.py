@@ -394,6 +394,32 @@ def test_forensic_cache_roundtrip(tmpbase="/tmp/claude-1000/-home-qkekdhd-slm-au
     assert got2 == payload, got2
 
 
+# ─────────────── P0: precision 헬퍼 + 코드-only floor ───────────────
+def test_score_precision_semantics():
+    import sys as _s, os as _o
+    _s.path.insert(0, _o.path.join(_o.path.dirname(_o.path.abspath(__file__)), "..", "scripts"))
+    from score import _precision, _domain_precision
+    assert _precision(set(), ["9.9.9.9"]) is None                 # 보고 안 함 ≠ 정확
+    assert _precision({"9.9.9.9"}, []) == 0.0                     # 없는 걸 만들어냄 = 0
+    assert _precision({"9.9.9.9", "1.1.1.1"}, ["9.9.9.9"]) == 0.5
+    assert _domain_precision({"sub.evil.com", "ads.x.com"}, ["evil.com"]) == 0.5   # suffix 인정
+
+
+def test_floor_report_promotes_iocs_without_llm():
+    e = ev(hosts=[WS], ext_ips=["9.9.9.9"],
+           alerts=[alert("ET MALWARE Zeus CnC Checkin", ["10.0.0.5"], ["9.9.9.9"], "threat")])
+    out, analysis = run.floor_report(FakeTools(e))
+    assert out["_mode"] == "floor" and out["verdict"] in ("suspicious", "confirmed")
+    assert "9.9.9.9" in analysis["iocs"]["c2"]                    # 승격기가 LLM 없이 채움
+    assert analysis["victims"] == []                              # 침해 판정은 floor 소관 아님
+
+
+def test_floor_quiet_capture_is_no_incident():
+    e = ev(hosts=[WS], alerts=[alert("ET CHAT Skype", ["10.0.0.5"], ["9.9.9.9"], "benign")])
+    out, analysis = run.floor_report(FakeTools(e))
+    assert out["verdict"] == "no_incident" and analysis is None
+
+
 if __name__ == "__main__":
     tests = [(k, v) for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = []
