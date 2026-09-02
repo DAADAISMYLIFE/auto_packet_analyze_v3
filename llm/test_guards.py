@@ -304,6 +304,26 @@ def test_upgrade_verdict_deterministic():
     assert out2["verdict"] == "suspicious"          # 침해 확정 호스트 없으면 승급 안 함
 
 
+def test_ground_iocs_accepts_http_host_only_domain():
+    """DNS 질의 없이 직결+Host 헤더로만 존재하는 도메인(searchl.org 실측)은 관측으로 인정 —
+    그라운딩이 환각으로 오인해 기각하면 살아있는 클릭사기 TDS 가 정책에서 빠진다."""
+    e = ev(hosts=[WS])
+    e["external"]["http"] = [{"url": "searchl.org/search?q=x", "dst_ip": "1.2.3.4",
+                              "src_ips": ["10.0.0.5"], "method": "GET", "status": 302,
+                              "count": 1, "first_ts": 1.0}]
+    a = {"iocs": {"c2": [], "delivery": [], "exfil": [], "domains": ["searchl.org"], "hashes": []}}
+    ground_iocs(a, ctx_for(a, e))
+    assert a["iocs"]["domains"] == ["searchl.org"], a
+
+
+def test_http_host_bare_ip_not_added_to_observed_domains():
+    e = ev(hosts=[WS])
+    e["external"]["http"] = [{"url": "1.2.3.4/x", "dst_ip": "1.2.3.4", "src_ips": ["10.0.0.5"],
+                              "method": "GET", "status": 200, "count": 1, "first_ts": 1.0}]
+    obs = FakeTools(e).observed_iocs()
+    assert "1.2.3.4" not in obs["domains"]         # bare-IP 호스트는 도메인 집합에 안 들어감
+
+
 # ─────────────── C2 technique 게이트 (시그니처 침묵 C2) + THINK 파서 ───────────────
 def test_signatureless_c2_target_survives_via_technique():
     """alert 0건(시그니처 침묵)인 C2 를 LLM 이 technique=c2_beacon 으로 적었을 때 —

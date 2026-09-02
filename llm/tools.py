@@ -274,7 +274,10 @@ class Tools:
     #  attach_hashes 오탐 방지 전용 최소 리더 — LLM 에 노출하는 tier2 는 만들지 않는다.
     #  업데이트/텔레메트리 인프라가 서빙한 실행파일은 멀웨어가 아님(MS Defender 업데이트 등).
     BENIGN_SERVING = ("windowsupdate.com", "download.microsoft.com", "delivery.mp.microsoft.com",
-                      "update.microsoft.com", "msftconnecttest.com", "digicert.com")
+                      "update.microsoft.com", "msftconnecttest.com", "digicert.com",
+                      # q2 카빙 검증(2026-09-02): 서명된 NVIDIA 드라이버·AOL CDN 광고 SWF 가
+                      # iocs.hashes 로 승격되던 오탐 — 정품 배포 인프라 서빙분은 멀웨어 아님
+                      "nvidia.com", "aolcdn.com")
 
     def _zeek(self, name):
         """zeek NDJSON 로그를 1회 로드 후 캐시. 파일 없으면 []."""
@@ -378,6 +381,14 @@ class Tools:
             sni = str(s.get("sni") or "").lower()
             if sni and not in_ad_zone(sni):
                 doms.add(sni)
+        # http Host 헤더 도메인 — DNS 질의 없이 '직결 + Host 헤더'로만 존재하는 C2/TDS 가 있다
+        #   (q2 실측: searchl.org / 2hood.eu — dns.log 질의 0건, 그라운딩이 환각으로 오인 기각).
+        #   sni 와 같은 기준으로 관측집합에 포함. bare-IP 호스트·AD 존은 제외.
+        for h in ext.get("http", []) or []:
+            host = str(h.get("url") or "").split("/", 1)[0].lower().split(":", 1)[0]
+            if host and "." in host and not re.fullmatch(r"(?:\d{1,3}\.){3}\d{1,3}", host) \
+                    and not in_ad_zone(host):
+                doms.add(host)
         for f in e.get("files", []) or []:
             for k in ("sha256", "md5"):
                 if f.get(k):
