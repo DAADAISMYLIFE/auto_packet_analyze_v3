@@ -204,11 +204,18 @@ zeek는 네이티브가 없으면 **docker `zeek/zeek:latest`** 로 폴백. 출�
 ./scripts/extract_log.sh pcaps/<파일>.pcap        # → output/<name>/{suricata,zeek}
 python3 scripts/build_evidence.py <name>          # → output/<name>/evidence.json
 cd llm && python3 test_guards.py                  # 가드 유닛테스트 (ollama 불필요, 1초)
+python3 scripts/build_evidence.py <name> --noalert   # (ablation) 알럿만 0 인 output/<name>-noalert/ — 아래 참고
 cd llm && python3 run.py <name>                   # → reports/<name>.json  (기본 auto: evidence 동일하면
                                                   #   forensic 캐시 재생 = LLM 생략. --fresh 강제호출 / --replay LLM 없이 캐시만)
 cd .. && python3 scripts/make_policy.py <name> --validate   # → reports/<name>.rules
 cd llm && python3 render_report.py <name>         # → reports/<name>.md
 ```
+
+**시그니처 제거 ablation** (`--noalert`): 같은 Zeek 로그에서 Suricata 알럿만 0 으로 만든 `<name>-noalert`
+케이스를 만들어 원본 truth 로 채점한다 — "시그니처 없는(미지의) 위협에서 행동 신호만으로 코드 바닥/LLM 이
+무엇을 잡나"를 4행(floor / floor-noalert / +LLM / +LLM-noalert)으로 잰다. 노트북 `ABLATION=True` 가 자동으로 병행.
+첫 실측(q2, 코드-only): 알럿 있음 iocR 0.80 → 알럿 없음 **no_incident, IOC 0** — 죽은 비콘·의심 TLD 승격기는
+행동 신호인데 `code_triage` 가 알럿/해시로만 사건 바닥을 정해 승격기까지 못 간다(후속 티켓, LLM 행 결과 뒤 결정).
 
 ### Kaggle
 `kaggle/run_pipeline.ipynb` — Settings에서 **Internet ON + GPU**, pcap 데이터셋 Add Input, **항상 Run All**.

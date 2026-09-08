@@ -285,6 +285,10 @@ class Tools:
             self._zc = {}
         if name not in self._zc:
             path = os.path.join(self.base, "zeek", name)
+            if not os.path.exists(path) and self.base.endswith("-noalert"):
+                # ablation 케이스(build_evidence --noalert)는 evidence.json 만 가진다 —
+                # 원본 Zeek 로그(files/http 조인용)는 원본 케이스 디렉터리에서 읽는다.
+                path = os.path.join(self.base[:-len("-noalert")], "zeek", name)
             rows = []
             if os.path.exists(path):
                 with open(path, encoding="utf-8") as f:

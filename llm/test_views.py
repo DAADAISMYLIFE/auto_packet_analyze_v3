@@ -154,6 +154,50 @@ def test_threat_alert_single_source():
     assert is_threat_alert({"signature": "ET MALWARE x"})   # 구 evidence 폴백
 
 
+def test_noalert_ablation_removes_only_alerts():
+    """시그니처 제거 ablation 계약: 같은 로그에서 알럿만 0, 나머지(호스트·외부 IP)는 동일,
+    _ablation 표식은 밑줄 키(LLM 번들 미노출)."""
+    import tempfile, os as _o, sys as _s
+    _s.path.insert(0, _o.path.join(_o.path.dirname(_o.path.abspath(__file__)), "..", "scripts"))
+    from build_evidence import build_evidence, ABLATION_SUFFIX
+    import run as _run
+    with tempfile.TemporaryDirectory() as root:
+        z = _o.path.join(root, "output", "x", "zeek"); s_ = _o.path.join(root, "output", "x", "suricata")
+        _o.makedirs(z); _o.makedirs(s_)
+        conn = {"ts": 1700000000.0, "uid": "C1", "id.orig_h": "10.0.0.5", "id.orig_p": 50000,
+                "id.resp_h": "9.9.9.10", "id.resp_p": 80, "proto": "tcp", "conn_state": "SF",
+                "local_orig": True, "local_resp": False, "orig_bytes": 100, "resp_bytes": 200,
+                "duration": 1.0, "community_id": "1:abc"}
+        open(f"{z}/conn.log", "w").write(json.dumps(conn) + "\n")
+        alert = {"timestamp": "2023-11-14T22:13:20.000000+0000", "event_type": "alert",
+                 "community_id": "1:abc", "src_ip": "10.0.0.5", "dest_ip": "9.9.9.10",
+                 "alert": {"signature": "ET MALWARE Example CnC Checkin",
+                           "category": "A Network Trojan was detected", "severity": 1}}
+        open(f"{s_}/eve.json", "w").write(json.dumps(alert) + "\n")
+        full = build_evidence("x", root)
+        abl = build_evidence("x", root, noalert=True)
+    assert len(full["alerts"]) == 1 and abl["alerts"] == [], (full["alerts"], abl["alerts"])
+    assert [h["ip"] for h in full["hosts"]] == [h["ip"] for h in abl["hosts"]]
+    assert {e["ip"] for e in full["external"]["ips"]} == {e["ip"] for e in abl["external"]["ips"]}
+    assert abl.get("_ablation") == "noalert" and "_ablation" not in full
+    assert ABLATION_SUFFIX == "-noalert"
+    # LLM 번들에 표식이 새지 않는다 (밑줄 키는 _bundle 에 없음)
+    from test_guards import FakeTools
+    t = FakeTools(abl)
+    assert "noalert" not in _run._bundle(t, t.http_view(0))
+
+
+def test_score_ablation_label_and_truth_key():
+    """채점기: -noalert 행은 원본 truth 로 채점하되 표에서는 접미사로 구분된다."""
+    import os as _o, sys as _s
+    _s.path.insert(0, _o.path.join(_o.path.dirname(_o.path.abspath(__file__)), "..", "scripts"))
+    from score import case_of, label_of
+    assert case_of("reports/q2-noalert.json") == "q2" and label_of("reports/q2-noalert.json") == "q2-noalert"
+    assert case_of("reports/2024-11-26-traffic-analysis-exercise-noalert.json") == "20241126"
+    assert label_of("reports/2024-11-26-traffic-analysis-exercise-noalert.json") == "20241126-noalert"
+    assert case_of("reports/q2.json") == "q2" and label_of("reports/q2.json") == "q2"
+
+
 if __name__ == "__main__":
     tests = [(k, v) for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = []

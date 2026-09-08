@@ -31,10 +31,22 @@ HASH_RE = re.compile(r"[0-9a-fA-F]{64}|[0-9a-fA-F]{32}")
 DOMAIN_RE = re.compile(r"(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}", re.I)
 
 
+ABLATION_SUFFIX = "-noalert"      # build_evidence --noalert 산출 (시그니처 제거 ablation)
+
+
 def case_of(path):
+    """truth 키 — ablation 접미사는 떼고 원본 truth 로 채점한다 (같은 pcap, 알럿만 0)."""
     stem = os.path.splitext(os.path.basename(path))[0]
+    if stem.endswith(ABLATION_SUFFIX):
+        stem = stem[:-len(ABLATION_SUFFIX)]
     digits = re.sub(r"\D", "", stem)
     return digits[:8] if len(digits) >= 8 else stem
+
+
+def label_of(path):
+    """표에 찍는 행 이름 — truth 키 + ablation 접미사(원본 행과 구분되게)."""
+    stem = os.path.splitext(os.path.basename(path))[0]
+    return case_of(path) + (ABLATION_SUFFIX if stem.endswith(ABLATION_SUFFIX) else "")
 
 
 def norm_set(xs):
@@ -210,14 +222,15 @@ def score(atoms, truth, ev):
 def score_file(path, truth_dir, output_dir):
     key = case_of(path)                                       # truth 키 (8자리 날짜 또는 stem)
     stem = os.path.splitext(os.path.basename(path))[0]        # evidence 디렉터리명 (= pcap stem)
+    label = label_of(path)
     tpath = os.path.join(truth_dir, key + ".json")
     if not os.path.exists(tpath):
-        return key, None
+        return label, None
     with open(tpath, encoding="utf-8") as f:
         truth = json.load(f)
     # evidence 디렉터리는 stem 우선, 없으면 8자리 키로 폴백 (로컬/Kaggle 명명 차이 흡수)
     ev = evidence_iocs(stem, output_dir) or evidence_iocs(key, output_dir)
-    return key, score(load_atoms(path), truth, ev)
+    return label, score(load_atoms(path), truth, ev)
 
 
 def _f(x):
@@ -226,19 +239,19 @@ def _f(x):
 
 def print_rows(rows, label):
     print(f"\n=== {label} ===")
-    hdr = (f"{'case':<10} {'verdict':<14} {'grd':<4} {'vR':<5} {'vP':<5} {'infra!':<7} "
+    hdr = (f"{'case':<18} {'verdict':<14} {'grd':<4} {'vR':<5} {'vP':<5} {'infra!':<7} "
            f"{'iocR':<5} {'iocP':<5} {'domR':<5} {'domP':<5} {'hashR':<6} {'fp':<4} {'pz':<3}")
     print(hdr); print("-" * len(hdr))
     agg = {}
     for case, r in rows:
         if r is None:
-            print(f"{case:<10} (truth 없음 — 스킵)"); continue
+            print(f"{case:<18} (truth 없음 — 스킵)"); continue
         vok = "OK" if r["verdict_ok"] else "XX"
         grd = "-" if r["ground_ok"] is None else ("ok" if r["ground_ok"] else "BAD")
         infra = "ok" if not r["infra_bad"] else f"FAIL{len(r['infra_bad'])}"
         fp = "ok" if not r["fp"] else f"FP{len(r['fp'])}"
         pz = "-" if r["pz_ok"] is None else ("OK" if r["pz_ok"] else "XX")
-        print(f"{case:<10} {(str(r['verdict'])+'/'+vok):<14} {grd:<4} {_f(r['victimR']):<5} "
+        print(f"{case:<18} {(str(r['verdict'])+'/'+vok):<14} {grd:<4} {_f(r['victimR']):<5} "
               f"{_f(r['victimP']):<5} {infra:<7} {_f(r['iocR']):<5} {_f(r['iocP']):<5} "
               f"{_f(r['domR']):<5} {_f(r['domP']):<5} {_f(r['hashR']):<6} {fp:<4} {pz:<3}")
         for k in ("victimR", "victimP", "iocR", "iocP", "domR", "domP", "hashR"):
@@ -252,7 +265,7 @@ def print_rows(rows, label):
     if agg:
         m = lambda k: sum(agg[k]) / len(agg[k]) if agg.get(k) else float("nan")
         print("-" * len(hdr))
-        print(f"{'AGG':<10} verdict={m('verdict'):.2f}  victim R/P={m('victimR'):.2f}/{m('victimP'):.2f}  "
+        print(f"{'AGG':<18} verdict={m('verdict'):.2f}  victim R/P={m('victimR'):.2f}/{m('victimP'):.2f}  "
               f"ioc R/P={m('iocR'):.2f}/{m('iocP'):.2f}  dom R/P={m('domR'):.2f}/{m('domP'):.2f}  "
               f"hashR={m('hashR'):.2f}  "
               f"infra_fail={sum(agg.get('infra_fail', []))}  ground_fail={sum(agg.get('ground_fail', []))}  "

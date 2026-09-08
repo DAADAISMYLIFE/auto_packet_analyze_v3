@@ -657,7 +657,13 @@ def build_signals(Z, hosts, read_ndjson):
 
 
 # ---------------------------------------------------------------------------
-def build_evidence(name, root="/home/qkekdhd/auto_packet_analyze_v3"):
+ABLATION_SUFFIX = "-noalert"
+
+
+def build_evidence(name, root="/home/qkekdhd/auto_packet_analyze_v3", noalert=False):
+    """noalert=True: 시그니처 제거 ablation — 같은 Zeek 로그에서 Suricata 알럿만 0 으로.
+    '미지의 멀웨어(시그니처 없음)' 상황을 시뮬레이션해 행동 신호만으로 코드 바닥/LLM 이
+    무엇을 잡는지 잰다. 원본 truth 로 채점하므로 순환 없음. 산출은 output/<name>-noalert/."""
     base = os.path.join(root, "output", name)
     Z = os.path.join(base, "zeek")
     S = os.path.join(base, "suricata")
@@ -678,7 +684,7 @@ def build_evidence(name, root="/home/qkekdhd/auto_packet_analyze_v3"):
 
     # ── suricata eve.json: alert 그룹 (community_id 조인) ──
     #   디코더 진단(checksum 등)은 위협이 아니므로 분리 — alert_cids(하드 시그널)에도 제외
-    eve = read_ndjson(f"{S}/eve.json")
+    eve = [] if noalert else read_ndjson(f"{S}/eve.json")
     alert_cids = set()
     sig_stat = {}                # (sig,cat,sev) -> dict(count, first_ts, src, dst, cids)
     diag_stat = Counter()        # 진단 시그니처 -> count
@@ -1061,18 +1067,25 @@ def build_evidence(name, root="/home/qkekdhd/auto_packet_analyze_v3"):
     #   여기부터 보게 해서 잘림 방어 + 오탐(MS텔레메트리·광고·AD RPC)을 뿌리에서 강등.
     #   캡 '전' 전량(full_external)으로 계산 — 랭킹이 캡에 좌우되면 안 된다.
     evidence["deviations"] = profile_deviations({**evidence, "external": full_external})
+    if noalert:
+        evidence["_ablation"] = "noalert"     # 밑줄 키 — LLM 번들(_bundle)에는 안 들어간다
     return evidence
 
 
 # ---------------------------------------------------------------------------
 def main():
-    if len(sys.argv) < 2:
-        raise SystemExit("사용법: python3 build_evidence.py <name>")
-    name = sys.argv[1]
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    noalert = "--noalert" in sys.argv
+    if not args:
+        raise SystemExit("사용법: python3 build_evidence.py <name> [--noalert]\n"
+                         "  --noalert: 시그니처 제거 ablation → output/<name>-noalert/evidence.json")
+    name = args[0]
     # scripts/ 안에 있으므로 부모 디렉터리가 프로젝트 루트
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    ev = build_evidence(name, root)
-    out = os.path.join(root, "output", name, "evidence.json")
+    ev = build_evidence(name, root, noalert=noalert)
+    out_dir = os.path.join(root, "output", name + (ABLATION_SUFFIX if noalert else ""))
+    os.makedirs(out_dir, exist_ok=True)
+    out = os.path.join(out_dir, "evidence.json")
     with open(out, "w", encoding="utf-8") as f:
         json.dump(ev, f, ensure_ascii=False, indent=2)
     size = os.path.getsize(out) / 1024
