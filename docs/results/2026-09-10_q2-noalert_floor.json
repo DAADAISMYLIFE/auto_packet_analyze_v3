@@ -1,0 +1,8 @@
+{
+  "verdict": "no_incident",
+  "grounds": [
+    "[코드 바닥] 위협 카테고리 alert·멀웨어 후보 해시 없음"
+  ],
+  "pipeline_status": "ok",
+  "_mode": "floor"
+}

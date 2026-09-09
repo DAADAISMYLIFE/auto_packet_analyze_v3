@@ -1,0 +1,60 @@
+{
+  "_provenance": {
+    "note": "밤 베이크오프 후보 qwen3:30b-thinking(MoE 활성 3B) 의 q2 결과. Kaggle stdout 에서 복원(캐시 재생 출력이라 첫 런 소요시간은 미기록).",
+    "commit": "195078a",
+    "date": "2026-09-03",
+    "case": "q2",
+    "model": "qwen3:30b-thinking",
+    "think": true,
+    "num_ctx": 131072,
+    "temperature": 0.6,
+    "num_predict": 24000,
+    "hardware": "Kaggle T4 x2",
+    "verdict_of_bakeoff": "탈락 — LLM 자력 IOC 기여 0(iocs 가 코드 바닥과 동일, 27b 가 찾은 136.243.24.249 누락), 서술 사실오류 3건(감염 호스트가 웹공격 주체라는 인과 오류 / 정상 NVIDIA 드라이버를 감염 페이로드로 / .gq 를 benign 이라 쓰고 룰로는 차단). 사전 기준(iocP/domP -5%p 이내)은 글자대로는 통과 — 정밀도만 보는 기준의 결함이 드러남."
+  },
+  "verdict": "confirmed",
+  "grounds": [
+    "[코드 판정 — LLM triage 생략] 위협 카테고리 alert 10종 — 예: ET WEB_SERVER Possible CVE-2014-6271 Attempt in HTTP Cookie",
+    "[코드 승급] 침해 확정 호스트 1대 + c2 8건/해시 0건 — suspicious → confirmed"
+  ],
+  "pipeline_status": "ok",
+  "_llm_delta": {"verdict_floor": "suspicious", "verdict_full": "confirmed", "iocs_added": [], "iocs_lost": [], "domains_added": [], "victims_added": ["192.168.0.53"]},
+  "analysis": {
+    "executive_summary": "192.168.0.53(password-ned-xp)이 88.214.241.199로 C2 체크인(1428538714.309737), 이어 x-dosexec 페이로드 다운로드(1428574692.124516) 후 감염됨. 192.168.0.2로 CVE-2014-6271 시도 802회(4xx 응답, 시도 실패).",
+    "victims": [
+      {"ip": "192.168.0.53", "status": "compromised", "role": null, "malware": ["Poweliks"], "mac": "00:60:6e:00:9d:f9", "hostname": "password-ned-xp", "username": null},
+      {"ip": "192.168.0.2", "status": "unknown", "role": null, "malware": [], "mac": "ec:f4:bb:4f:c0:d7", "hostname": null, "username": null},
+      {"ip": "192.168.0.54", "status": "unknown", "role": null, "malware": [], "mac": "ec:f4:bb:4f:b0:96", "hostname": "Dell-Dator32", "username": null},
+      {"ip": "192.168.0.51", "status": "unknown", "role": null, "malware": [], "mac": "ec:f4:bb:4f:b2:45", "hostname": "homer-xubuntu", "username": null},
+      {"ip": "192.168.0.1", "status": "infrastructure", "role": "dns_server", "malware": [], "mac": "78:54:2e:9f:10:28", "hostname": null, "username": null}
+    ],
+    "iocs": {
+      "c2": ["88.214.241.199", "46.108.156.146", "146.52.78.242", "60.250.33.201", "61.240.144.64", "66.135.38.206", "91.217.90.49", "94.242.254.208"],
+      "delivery": [], "exfil": [],
+      "domains": ["gxgfwamxzl.yjuggczkkq.gq", "uugzv.yjuggczkkq.gq", "zzwfbedgue.yjuggczkkq.gq"],
+      "hashes": []
+    },
+    "timeline": [
+      {"ts": 1428537754.107356, "event": "zzwfbedgue.yjuggczkkq.gq DNS 질의 (benign)", "host": "192.168.0.53"},
+      {"ts": 1428538714.309737, "event": "88.214.241.199 로 C2 체크인", "host": "192.168.0.53"},
+      {"ts": 1428538714.137448, "event": "88.214.241.199/click 요청", "host": "192.168.0.53"},
+      {"ts": 1428574692.124516, "event": "x-dosexec 페이로드 다운로드", "host": "192.168.0.53"}
+    ],
+    "patient_zero": "192.168.0.53",
+    "anomaly_analysis": ["exfil_candidate 213.155.151.152은 192.168.0.54의 정상 광고 트래픽과 관련된 것으로 보임"],
+    "assessment": "192.168.0.53이 Poweliks 악성코드로 감염되어 88.214.241.199로 C2 통신, 페이로드 다운로드 후 감염됨. 192.168.0.2로 CVE-2014-6271 시도 802회는 404 응답으로 시도 실패. 192.168.0.54의 213.155.151.152 연결은 정상 광고 트래픽(Adnxs, Pubmatic 등)으로 판단됨. 암호화된 페이로드 검사 불가 및 .gq 도메인은 benign 처리됨.",
+    "attacks": [
+      {"technique": "c2_checkin", "actor": "192.168.0.53", "target": "88.214.241.199", "sample_uri": "CnC checkin x13", "disposition": "succeeded", "actor_scope": "internal", "target_scope": "external"},
+      {"technique": "exploit_cve_2014_6271", "actor": "146.52.78.242", "target": "192.168.0.2", "sample_uri": "/cgi-bin/", "disposition": "attempted", "actor_scope": "external", "target_scope": "internal"}
+    ],
+    "_excluded_benign_hashes": [
+      {"sha256": "6a34b09daeb0eba260faaf911a27e4e0af44313e98931f4a30bf940e5515aaa8", "serving_host": "o.aolcdn.com"},
+      {"sha256": "a8ab7f86c5615c113d8dba4c3b8dbe4a8fad7f2aa0462d2012aabba7383e07e9", "serving_host": "download.gfe.nvidia.com"}
+    ],
+    "_c2_kept_despite_target_label": ["88.214.241.199"],
+    "_iocs_added_from_dns_dom": ["gxgfwamxzl.yjuggczkkq.gq", "uugzv.yjuggczkkq.gq", "zzwfbedgue.yjuggczkkq.gq"],
+    "_iocs_added_from_dns_ip": ["46.108.156.146"],
+    "_iocs_added_inbound": ["146.52.78.242", "60.250.33.201", "61.240.144.64", "66.135.38.206", "91.217.90.49"],
+    "_iocs_added_dead_beacon": ["94.242.254.208"]
+  }
+}

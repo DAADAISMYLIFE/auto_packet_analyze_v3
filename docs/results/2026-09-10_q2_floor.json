@@ -1,0 +1,68 @@
+{
+  "verdict": "suspicious",
+  "grounds": [
+    "[코드 판정 — LLM triage 생략] 위협 카테고리 alert 10종 — 예: ET WEB_SERVER Possible CVE-2014-6271 Attempt in HTTP Cookie"
+  ],
+  "pipeline_status": "ok",
+  "_mode": "floor",
+  "analysis": {
+    "victims": [],
+    "attacks": [],
+    "iocs": {
+      "c2": [
+        "88.214.241.199",
+        "46.108.156.146",
+        "146.52.78.242",
+        "60.250.33.201",
+        "61.240.144.64",
+        "66.135.38.206",
+        "91.217.90.49",
+        "94.242.254.208"
+      ],
+      "delivery": [],
+      "exfil": [],
+      "domains": [
+        "gxgfwamxzl.yjuggczkkq.gq",
+        "uugzv.yjuggczkkq.gq",
+        "zzwfbedgue.yjuggczkkq.gq"
+      ],
+      "hashes": []
+    },
+    "timeline": [],
+    "patient_zero": "",
+    "executive_summary": "(코드-only 바닥 — LLM 분석 없음)",
+    "anomaly_analysis": [],
+    "assessment": "코드 결정론 신호만 반영된 바닥 보고서.",
+    "_excluded_benign_hashes": [
+      {
+        "sha256": "6a34b09daeb0eba260faaf911a27e4e0af44313e98931f4a30bf940e5515aaa8",
+        "serving_host": "o.aolcdn.com"
+      },
+      {
+        "sha256": "a8ab7f86c5615c113d8dba4c3b8dbe4a8fad7f2aa0462d2012aabba7383e07e9",
+        "serving_host": "download.gfe.nvidia.com"
+      }
+    ],
+    "_iocs_added_from_alerts": [
+      "88.214.241.199"
+    ],
+    "_iocs_added_from_dns_dom": [
+      "gxgfwamxzl.yjuggczkkq.gq",
+      "uugzv.yjuggczkkq.gq",
+      "zzwfbedgue.yjuggczkkq.gq"
+    ],
+    "_iocs_added_from_dns_ip": [
+      "46.108.156.146"
+    ],
+    "_iocs_added_inbound": [
+      "146.52.78.242",
+      "60.250.33.201",
+      "61.240.144.64",
+      "66.135.38.206",
+      "91.217.90.49"
+    ],
+    "_iocs_added_dead_beacon": [
+      "94.242.254.208"
+    ]
+  }
+}
