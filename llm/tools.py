@@ -57,10 +57,8 @@ class Tools:
         self.base = os.path.join(ROOT, "output", filename)
         with open(os.path.join(self.base, "evidence.json"), encoding="utf-8") as f:
             self.evidence = json.load(f)
-            
-        # tool 등록 
-        self.TOOLS = [self.get_host_info, self.get_alerts_by_severity, self.search_external]
-        self.AVAILABLE = {fn.__name__: fn for fn in self.TOOLS}
+        # (tool-calling 등록소 TOOLS/AVAILABLE 는 2026-09-10 제거 — 분석 경로는 2026-07-02 부터
+        #  evidence 주입 + format 강제 단일 chat 이라 tool 은 한 번도 호출되지 않았다. docs/HISTORY.md 1단계)
 
 
     def get_hosts_info(self):
@@ -101,21 +99,6 @@ class Tools:
         """
         return self.evidence.get("meta", {})
 
-    def get_host_info(self, ip: str):
-        """Get one host's full detail.
-
-        Returns all fields for the host matching the given IP (None if not found).
-
-        Args:
-            ip: the IP address to look up.
-        """
-        
-        for h in self.evidence.get("hosts", []):
-            if h.get("ip") == ip:
-                return h
-
-        return None
-
     def get_alerts(self):
         """Collect all Suricata alerts.
 
@@ -143,25 +126,13 @@ class Tools:
         # 3. return
         return result
 
-    def get_alerts_by_severity(self, severity: int):
-        """Collect Suricata alerts of a given severity.
-
-        Returns all alerts whose severity matches (1 = highest, range 1-3).
-
-        Args:
-            severity: alert severity level (1-3).
-        """
-
-        return [a for a in self.evidence.get("alerts", []) if a.get("severity") == severity]
-
     def get_external(self):
         """Collect the alert-linked external contacts (the C2 / malware IOCs).
 
         Returns only external IPs/domains that a Suricata alert references (an IP seen in
         an alert, or a domain named in an alert signature or resolving to a flagged IP),
         plus SNI and a count of the un-flagged background. This drops benign CDN/telemetry
-        noise. To reach ALL external contacts (e.g. a benign-looking precursor domain),
-        use search_external.
+        noise. (모든 외부 접촉은 get_http / anomalies / deviations 경로로 모델에 닿는다.)
         """
         e = self.evidence
         alert_ips = {ip for a in e.get("alerts", [])
@@ -188,24 +159,6 @@ class Tools:
         """
         return self.evidence.get("external", {}).get("http", [])
 
-    def search_external(self, keyword: str) -> dict:
-        """Search ALL external contacts (not just alert-linked) by substring.
-
-        Use when you need an external IP/domain/SNI that get_external dropped as
-        background — e.g. a benign-looking precursor domain (patient-zero).
-
-        Args:
-            keyword: substring to match against external IPs, domains, and SNI.
-        """
-        k = keyword.lower()
-        ext = self.evidence.get("external", {})
-        ips = [x for x in ext.get("ips", []) if k in x.get("ip", "").lower()]
-        doms = [d for d in ext.get("domains", []) if k in d.get("query", "").lower()]
-        sni = [s for s in ext.get("sni", []) if k in s.get("sni", "").lower()]
-        return {"ips": ips[:30], "domains": doms[:30], "sni": sni[:30]}
-
-    # 멀웨어 후보로 취급할 mime (부분일치) — 이 외의 파일은 mime별 집계로만 요약
-    #   주의: "zip" 같은 짧은 토큰은 x-gzip(HTTP 압축 응답 노이즈)까지 잡으므로 "/zip", "x-zip" 사용
     INTERESTING_MIME = ("x-dosexec", "x-executable", "x-dosdriver", "/zip", "x-zip", "rar",
                         "x-7z", "msdownload", "ms-pol", "x-msi", "java-archive",
                         "vbs", "powershell", "x-sh", "hta")
@@ -568,7 +521,6 @@ class Tools:
 # ====================== LLM 전송용 무손실 구조 압축 ======================
 # 프롬프트(tier1_evidence) 직렬화 직전에만 쓴다. evidence.json/Tools.evidence 는
 # 키-값 그대로 — ground_iocs/attach_identity/score.py 는 이 함수를 모른다.
-# (Tools 의 tool 이 아니라 코드용 헬퍼 — TOOLS 에 등록하지 않는다.)
 
 TABLE_MIN = 4   # 이 건수 이상의 균일 dict 리스트만 표로 (미만은 키-값 앵커 유지가 SLM 오독 방지에 안전)
 

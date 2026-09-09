@@ -660,10 +660,12 @@ def build_signals(Z, hosts, read_ndjson):
 ABLATION_SUFFIX = "-noalert"
 
 
-def build_evidence(name, root="/home/qkekdhd/auto_packet_analyze_v3", noalert=False):
+def build_evidence(name, root=None, noalert=False):
     """noalert=True: 시그니처 제거 ablation — 같은 Zeek 로그에서 Suricata 알럿만 0 으로.
     '미지의 멀웨어(시그니처 없음)' 상황을 시뮬레이션해 행동 신호만으로 코드 바닥/LLM 이
     무엇을 잡는지 잰다. 원본 truth 로 채점하므로 순환 없음. 산출은 output/<name>-noalert/."""
+    if root is None:   # scripts/ 의 부모 = 프로젝트 루트 (옛 하드코딩 절대경로 제거)
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     base = os.path.join(root, "output", name)
     Z = os.path.join(base, "zeek")
     S = os.path.join(base, "suricata")

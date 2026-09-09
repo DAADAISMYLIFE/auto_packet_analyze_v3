@@ -45,7 +45,8 @@ elif docker info >/dev/null 2>&1; then
   # ── docker zeek (로컬 기본) ──
   echo "[zeek] docker zeek/zeek:latest 사용"
   # --user : host 유저 권한으로 실행 (root 소유 파일 생성 방지 → 청소 가능)
-  # -v scripts:/scripts : http-bodies.zeek(로컬) 를 컨테이너에서 로드하려면 마운트 필요
+  # -v scripts:/scripts : hash-files.zeek·http-bodies.zeek(로컬) 를 컨테이너에서 로드하려면 마운트 필요
+  #   (hash-files 는 네이티브 경로에만 있었다 — docker Zeek 8.x 도 sha256 이 빠져 해시 IOC 0 이 되던 갭, 2026-09 리뷰)
   if docker run --rm \
     --user "$(id -u):$(id -g)" \
     -v "$PCAP_DIR":/pcap:ro \
@@ -53,7 +54,7 @@ elif docker info >/dev/null 2>&1; then
     -v "$SCRIPTS_DIR":/scripts:ro \
     -w /out \
     zeek/zeek:latest \
-    zeek -C -r "/pcap/$PCAP_NAME" LogAscii::use_json=T $ZEEK_SCRIPTS /scripts/http-bodies.zeek; then
+    zeek -C -r "/pcap/$PCAP_NAME" LogAscii::use_json=T $ZEEK_SCRIPTS /scripts/hash-files.zeek /scripts/http-bodies.zeek; then
     OK=1
   else
     OK=0

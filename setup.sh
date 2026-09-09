@@ -11,7 +11,7 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-MODEL="${MODEL:-gemma4:26b}"
+MODEL="${MODEL:-qwen3.8:27b}"   # .env 와 동일 기본값 (노트북은 .env 값을 넘긴다)
 LOG="$ROOT/setup.log"
 : > "$LOG"
 FAILED=0

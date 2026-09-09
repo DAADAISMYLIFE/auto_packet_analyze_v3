@@ -110,6 +110,13 @@
 
 **현재 결론**: LLM은 분석가가 아니라 **판독기 + 이야기꾼**, 코드는 **심판**. 행동 신호의 판단·승격은 코드가 더 정확하고 2초. LLM의 증명된 가치는 시그니처 없는 공격 패턴 판독과 한글 서술.
 
+**9/10 낡은 것 정리(코드)** — "낡은 건 고치되 왜 그렇게 했냐만 남기면 된다"(사용자):
+- `llm/test.py`·`llm/test_tools.py` 삭제, `Tools.TOOLS/AVAILABLE` 등록소와 `get_host_info/get_alerts_by_severity/search_external` 제거 —
+  0단계 tool-calling 시절 유산. 1단계(7/02, 151c57b)부터 분석 경로는 evidence 주입 + format 강제 단일 chat 이라 두 달 넘게 호출된 적이 없다.
+- 기본 모델 `gemma4:26b` → `qwen3.8:27b` (setup.sh / config.py / 노트북) — 8/20 전환 뒤 .env 만 바뀌고 폴백 기본값은 안 바뀐 채 남아 있었다.
+- `build_evidence.build_evidence()` 의 하드코딩 절대경로 기본값 → `__file__` 기준 루트 (초기 개발기 경로 유산).
+- docker Zeek 경로에 `hash-files.zeek` 추가 — 네이티브 경로에만 있어 docker Zeek 8.x 는 sha256 없이 해시 IOC 0 이 되던 갭(9월 리뷰 D).
+
 ---
 
 ## 반복해서 나타난 고민 7가지

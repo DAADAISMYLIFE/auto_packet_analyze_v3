@@ -736,7 +736,7 @@ def main():
     fmode = ("floor" if "--floor" in flags else
              "replay" if "--replay" in flags else ("fresh" if "--fresh" in flags else "auto"))
 
-    # 2. TOOLS 클래스 생성
+    # 2. Tools(evidence 읽기 API) 생성
     tools = Tools(filename)
 
     # 코드-only 바닥 (LLM 0회, 수 초) — reports/floor/ 에 별도 저장해 LLM 행과 나란히 채점

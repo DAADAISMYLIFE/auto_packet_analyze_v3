@@ -31,7 +31,7 @@ def _load_dotenv(path: Path):
 _load_dotenv(_ENV)
 
 # ── 모델 / 튜너블 ──
-MODEL = os.environ.get("MODEL", "gemma4:26b")
+MODEL = os.environ.get("MODEL", "qwen3.8:27b")
 NUM_CTX = int(os.environ.get("NUM_CTX", "65536"))   # evidence 안 잘리게 크게 (VRAM 되면 NUM_CTX=131072 로 더)
 TEMPERATURE = float(os.environ.get("TEMPERATURE", "0.3"))
 TOP_P = float(os.environ.get("TOP_P", "0.95"))
